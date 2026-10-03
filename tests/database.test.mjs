@@ -7,7 +7,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { PrismaClient } from "@prisma/client";
 import { createAuthAdapter } from "../lib/auth-adapter.ts";
-import { createGlobalMatch, reportGlobalMatch } from "../lib/match-service.ts";
+import { createGlobalMatch, deleteGlobalMatch, reportGlobalMatch } from "../lib/match-service.ts";
 import { ratePlayer } from "../lib/rating-service.ts";
 
 test("baseline upgrade, Google adapter, global profiles and match constraints", {
@@ -47,6 +47,11 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     // Crew/season tables must upgrade cleanly on top of the legacy data above.
     cpSync("prisma/migrations/20261010000000_crews_and_seasons", path.join(migrations, "20261010000000_crews_and_seasons"), { recursive: true });
     migrate();
+    // Custom team names arrived after these rows, so simulate the messy states a
+    // backfill has to repair: an empty name and a whitespace-only name.
+    await db.$executeRaw`UPDATE "Match" SET "teamAName" = '', "teamBName" = '   ' WHERE id = 'old-match'`;
+    cpSync("prisma/migrations/20261012000000_backfill_match_team_names", path.join(migrations, "20261012000000_backfill_match_team_names"), { recursive: true });
+    migrate();
 
     const legacy = await db.user.findUniqueOrThrow({ where: { id: "legacy" }, include: { playerProfile: true, profiles: true } });
     assert.equal(legacy.role, "CAPTAIN");
@@ -55,7 +60,7 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     assert.equal(legacy.playerProfile.position, "GK");
     const legacyMatch = await db.match.findUniqueOrThrow({ where: { id: "old-match" } });
     assert.equal(legacyMatch.status, "COMPLETED");
-    // Existing matches keep the default team names after the crew/season upgrade.
+    // The backfill repairs blank and whitespace-only names on pre-existing rows.
     assert.equal(legacyMatch.teamAName, "A Tak\u0131m\u0131");
     assert.equal(legacyMatch.teamBName, "B Tak\u0131m\u0131");
     assert.equal(legacyMatch.seasonId, null);
@@ -107,6 +112,21 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await assert.rejects(reportGlobalMatch(db, user.id, globalId, report), /zaten/);
     assert.equal((await db.match.findUniqueOrThrow({ where: { id: globalId } })).status, "COMPLETED");
 
+    // --- custom team names --------------------------------------------------
+    const named = await createGlobalMatch(db, user.id, { ...input, requestId: randomUUID(), teamAName: "  Gece  Yıldızları ", teamBName: "<b>Sahil</b>" });
+    const namedRow = await db.match.findUniqueOrThrow({ where: { id: named } });
+    assert.equal(namedRow.teamAName, "Gece Yıldızları");
+    assert.equal(namedRow.teamBName, "bSahil/b");
+    // Omitting them keeps the platform defaults.
+    const defaultNamed = await createGlobalMatch(db, user.id, { ...input, requestId: randomUUID() });
+    const defaultRow = await db.match.findUniqueOrThrow({ where: { id: defaultNamed } });
+    assert.equal(defaultRow.teamAName, "A Takımı");
+    assert.equal(defaultRow.teamBName, "B Takımı");
+    // Identical names would make the scoreline meaningless.
+    await assert.rejects(createGlobalMatch(db, user.id, { ...input, requestId: randomUUID(), teamAName: "Krampon", teamBName: "Krampon" }), /farklı/);
+    await assert.rejects(createGlobalMatch(db, user.id, { ...input, requestId: randomUUID(), teamAName: "x".repeat(31) }));
+
+
     const scores = n => ({ pace: n, shooting: n, passing: n, dribbling: n, defending: n, physical: n });
     await assert.rejects(ratePlayer(db, user.id, profile.id, scores(90)), /Kendini/);
     await assert.rejects(ratePlayer(db, "missing-user", profile.id, scores(90)), /oturumu/);
@@ -135,6 +155,32 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     assert.equal((await db.matchPlayer.findUniqueOrThrow({ where: { matchId_playerProfileId: { matchId: globalId, playerProfileId: profile.id } } })).ovrAtMatch, 0);
     await assert.rejects(db.playerRating.create({ data: { raterId: extras[0].id, playerProfileId: profile.id, ...scores(50) } }), { code: "P2002" });
     await assert.rejects(db.playerRating.update({ where: { id: ratings[0].id }, data: { pace: 100 } }));
+    // --- safe deletion ------------------------------------------------------
+    // Only the creating captain may delete, and a plain PLAYER never may.
+    await assert.rejects(deleteGlobalMatch(db, extras[0].id, globalId), /kaptan/);
+    await assert.rejects(deleteGlobalMatch(db, extras[1].id, globalId), /kaptan/);
+    // An existing captain who did not create the match is rejected too.
+    const otherCaptain = await db.user.create({ data: { name: "Other Captain", email: `cap2-${randomUUID()}@example.test`, role: "CAPTAIN", playerProfile: { create: { position: "MID", ovrRating: 70 } } } });
+    await assert.rejects(deleteGlobalMatch(db, otherCaptain.id, globalId), /kuran kaptan/);
+
+    // The crucial guarantee: deleting a match must not rewrite player history.
+    const beforeDelete = await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } });
+    await deleteGlobalMatch(db, user.id, globalId);
+    assert.equal(await db.match.findUnique({ where: { id: globalId } }), null);
+    // Roster rows cascaded with the match.
+    assert.equal(await db.matchPlayer.count({ where: { matchId: globalId } }), 0);
+    // Career totals are untouched.
+    const afterDelete = await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } });
+    assert.equal(afterDelete.goals, beforeDelete.goals);
+    assert.equal(afterDelete.assists, beforeDelete.assists);
+    assert.equal(afterDelete.matchesPlayed, beforeDelete.matchesPlayed);
+    assert.equal(afterDelete.motmCount, beforeDelete.motmCount);
+    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: legacy.playerProfile.id } })).assists, 1);
+    // Other matches in the archive are unaffected.
+    assert.notEqual(await db.match.findUnique({ where: { id: named } }), null);
+    // Deleting twice is a clean, explicit error rather than a crash.
+    await assert.rejects(deleteGlobalMatch(db, user.id, globalId), /zaten silinmiş/);
+
     console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages and historical snapshots.");
   } finally {
     if (createdSchema) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);

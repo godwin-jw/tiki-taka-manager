@@ -11,6 +11,34 @@ import { Label } from "@/components/ui/label";
 import { snakeDraft, type DraftPlayer } from "@/lib/football";
 import { parseLineup } from "@/lib/validation";
 import { saveMatch } from "@/app/actions/global-match";
+import { cn } from "@/lib/utils";
+
+/**
+ * Inline team name input.
+ *
+ * Deliberately a bare input on the match builder: the value is optional, falls
+ * back to the platform default when empty, and is validated again on the server.
+ * `maxLength` mirrors the 30-character server limit so the UI cannot drift.
+ */
+function TeamNameField({ id, label, value, onChange, disabled, placeholder, tone }: { id: string; label: string; value: string; onChange: (value: string) => void; disabled?: boolean; placeholder: string; tone: "emerald" | "sky" }) {
+  return <div className="space-y-2">
+    <label htmlFor={id} className="text-xs font-semibold tracking-wide text-zinc-300">{label}</label>
+    <input
+      id={id}
+      name={`${id}-name`}
+      type="text"
+      value={value}
+      maxLength={30}
+      disabled={disabled}
+      onChange={event => onChange(event.target.value)}
+      placeholder={placeholder}
+      className={cn(
+        "h-11 w-full rounded-xl border bg-zinc-950/60 px-4 text-sm text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus-visible:ring-2 disabled:opacity-50",
+        tone === "emerald" ? "border-emerald-400/25 focus-visible:ring-emerald-400" : "border-sky-300/25 focus-visible:ring-sky-300",
+      )}
+    />
+  </div>;
+}
 
 export function MatchBuilder({ requestId }: { requestId: string }) {
   const { players, selectedIds, capacity, setCapacity, toggle, clear } = useRoster();
@@ -18,6 +46,8 @@ export function MatchBuilder({ requestId }: { requestId: string }) {
   const [draftSelection, setDraftSelection] = useState("");
   const [error, setError] = useState("");
   const [date, setDate] = useState("");
+  const [teamAName, setTeamAName] = useState("");
+  const [teamBName, setTeamBName] = useState("");
   const [state, action, pending] = useActionState(saveMatch, {});
   const selectionKey = [...selectedIds].sort().join(",");
   const validDraft = draft.length > 0 && draftSelection === selectionKey;
@@ -38,6 +68,6 @@ export function MatchBuilder({ requestId }: { requestId: string }) {
       {selectedIds.length > 0 && missingKeeper && <p className="text-xs text-amber-200">İki kaleci seçilmedi. Takımlar kurulabilir; eksik kaleci mevkisini taktik tahtasında atayabilirsin.</p>}
     </section>
     {draft.length > 0 && !validDraft && <p role="status" className="rounded-xl border border-amber-400/20 p-4 text-sm text-amber-200">Oyuncu seçimi değişti. Takımları yeniden dengele.</p>}
-    {validDraft && <><TacticalPitch players={draft} onChange={pending ? undefined : setDraft} /><form action={action} className="glass space-y-4 p-6"><input type="hidden" name="requestId" value={requestId} /><input type="hidden" name="lineup" value={JSON.stringify(draft.map(({ id, team, position }) => ({ id, team, position })))} /><input type="hidden" name="date" value={date && Number.isFinite(new Date(date).getTime()) ? new Date(date).toISOString() : ""} /><div className="flex flex-wrap items-end justify-between gap-4"><div className="space-y-2"><Label htmlFor="match-date">Maç tarihi ve saati (yerel saat)</Label><Input id="match-date" type="datetime-local" required value={date} onChange={e => setDate(e.target.value)} disabled={pending} /></div><Button type="submit" disabled={pending || Boolean(lineupError)}>{pending ? <LoaderCircle className="animate-spin" /> : <Check />}{pending ? "Kaydediliyor…" : "Kadroyu onayla ve maçı oluştur"}</Button></div>{lineupError && <p role="alert" className="text-sm text-amber-200">{lineupError}</p>}{state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}<p className="text-xs text-zinc-500">OVR değerleri kayıtta sunucudan alınır. Takımlardaki oyuncu sayıları eşit olmalıdır.</p></form></>}
+    {validDraft && <><section className="glass space-y-4 p-6"><div className="flex flex-wrap items-center gap-2"><p className="eyebrow">TAKIM İSİMLERİ</p><span className="text-[10px] text-zinc-500">İsteğe bağlı · boş bırakırsan A Takımı / B Takımı kullanılır</span></div><div className="grid gap-3 sm:grid-cols-2"><TeamNameField id="team-a" label="A takımı" value={teamAName} onChange={setTeamAName} disabled={pending} placeholder="A Takımı" tone="emerald" /><TeamNameField id="team-b" label="B takımı" value={teamBName} onChange={setTeamBName} disabled={pending} placeholder="B Takımı" tone="sky" /></div></section><TacticalPitch players={draft} onChange={pending ? undefined : setDraft} teamAName={teamAName.trim() || "A Takımı"} teamBName={teamBName.trim() || "B Takımı"} /><form action={action} className="glass space-y-4 p-6"><input type="hidden" name="requestId" value={requestId} /><input type="hidden" name="lineup" value={JSON.stringify(draft.map(({ id, team, position }) => ({ id, team, position })))} /><input type="hidden" name="teamAName" value={teamAName} /><input type="hidden" name="teamBName" value={teamBName} /><input type="hidden" name="date" value={date && Number.isFinite(new Date(date).getTime()) ? new Date(date).toISOString() : ""} /><div className="flex flex-wrap items-end justify-between gap-4"><div className="space-y-2"><Label htmlFor="match-date">Maç tarihi ve saati (yerel saat)</Label><Input id="match-date" type="datetime-local" required value={date} onChange={e => setDate(e.target.value)} disabled={pending} /></div><Button type="submit" disabled={pending || Boolean(lineupError)}>{pending ? <LoaderCircle className="animate-spin" /> : <Check />}{pending ? "Kaydediliyor…" : "Kadroyu onayla ve maçı oluştur"}</Button></div>{lineupError && <p role="alert" className="text-sm text-amber-200">{lineupError}</p>}{state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}<p className="text-xs text-zinc-500">OVR değerleri kayıtta sunucudan alınır. Takımlardaki oyuncu sayıları eşit olmalıdır.</p></form></>}
   </div>;
 }

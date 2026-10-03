@@ -34,6 +34,27 @@ export function jsonField(form: FormData, key: string): unknown {
   try { return JSON.parse(raw) as unknown; } catch { throw new ValidationError("Form verisi okunamadı."); }
 }
 
+/**
+ * Normalises a user-supplied team name.
+ *
+ * Blank input falls back to the platform default, so the field can simply be
+ * cleared instead of being forced to type something. Control characters and
+ * angle brackets are stripped because team names are rendered inside links and
+ * inline on the tactical board.
+ */
+export function teamName(value: unknown, side: "A" | "B"): string {
+  const fallback = side === "A" ? "A Takımı" : "B Takımı";
+  if (typeof value !== "string") return fallback;
+  // Collapse whitespace FIRST, then drop what is left: reversing the order would
+  // delete the separator and silently glue words together ("Boğaz\tKaptanları"
+  // would become "BoğazKaptanları" instead of "Boğaz Kaptanları").
+  const collapsed = value.replace(/\s+/g, " ").replace(/[<>]/g, "").replace(/[\u0000-\u001F\u007F]/g, "");
+  const cleaned = collapsed.trim();
+  if (cleaned.length === 0) return fallback;
+  if (cleaned.length > 30) throw new ValidationError("Takım adı en fazla 30 karakter olabilir.");
+  return cleaned;
+}
+
 export function parseLineup(value: unknown) {
   if (!Array.isArray(value) || value.length < 4 || value.length > 22 || value.length % 2 !== 0) throw new ValidationError("4–22 arasında çift sayıda oyuncu seçin.");
   const rows = value.map(item => {

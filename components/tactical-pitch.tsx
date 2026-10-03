@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { positions, teamAverage, type DraftPlayer, type Position, type Team } from "@/lib/football";
 import { cn } from "@/lib/utils";
 
-export function TacticalPitch({ players, onChange }: { players: DraftPlayer[]; onChange?: (players: DraftPlayer[]) => void }) {
+export function TacticalPitch({ players, onChange, teamAName = "A Takımı", teamBName = "B Takımı" }: { players: DraftPlayer[]; onChange?: (players: DraftPlayer[]) => void; teamAName?: string; teamBName?: string }) {
+  const teamNames = { A: teamAName, B: teamBName } as const;
   function move(id: string, team: Team, position: Position) {
     onChange?.(players.map(p => p.id === id ? { ...p, team, position } : p));
   }
@@ -17,7 +18,7 @@ export function TacticalPitch({ players, onChange }: { players: DraftPlayer[]; o
     onChange?.(players.map(p => p.id === source.id ? { ...p, team: target.team, position: target.position } : p.id === target.id ? { ...p, team: source.team, position: source.position } : p));
   }
   return <div className="grid gap-6 xl:grid-cols-2">{(["A", "B"] as const).map(team => <section key={team} aria-label={`${team} takımı taktik tahtası`} className="overflow-hidden rounded-2xl border border-white/10 bg-zinc-900/60">
-    <header className="flex items-center justify-between p-5"><div className="flex items-center gap-3"><span className={cn("flex size-9 items-center justify-center rounded-lg font-black", team === "A" ? "bg-emerald-400/15 text-emerald-300" : "bg-sky-400/15 text-sky-300")}>{team}</span><div><h2 className="font-bold">Takım {team}</h2><p className="text-xs text-zinc-500">{players.filter(p => p.team === team).length} oyuncu</p></div></div><p className="font-mono text-lg font-bold">{teamAverage(players, team).toFixed(1)} <span className="text-[10px] text-zinc-500">ORT. OVR</span></p></header>
+    <header className="flex items-center justify-between p-5"><div className="flex items-center gap-3"><span className={cn("flex size-9 items-center justify-center rounded-lg font-black", team === "A" ? "bg-emerald-400/15 text-emerald-300" : "bg-sky-400/15 text-sky-300")}>{team}</span><div><h2 className="font-bold">{teamNames[team]}</h2><p className="text-xs text-zinc-500">{players.filter(p => p.team === team).length} oyuncu</p></div></div><p className="font-mono text-lg font-bold">{teamAverage(players, team).toFixed(1)} <span className="text-[10px] text-zinc-500">ORT. OVR</span></p></header>
     <div className="pitch relative m-3 grid min-h-[560px] grid-rows-4 gap-3 overflow-hidden rounded-xl border border-emerald-200/20 p-3 sm:p-5">
       <div aria-hidden="true" className="pointer-events-none absolute inset-4 rounded border border-white/15"><div className="absolute top-1/2 w-full border-t border-white/15" /><div className="absolute top-1/2 left-1/2 size-28 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15" /><div className="absolute bottom-0 left-1/4 h-16 w-1/2 border border-white/15" /></div>
       {([...positions].reverse()).map(position => <div key={position} aria-label={`${team} ${position} alanı`} onDragOver={e => { if (onChange) e.preventDefault(); }} onDrop={e => { e.preventDefault(); if (onChange) move(e.dataTransfer.getData("text/plain"), team, position); }} className="relative z-10 flex flex-wrap items-center justify-center gap-2 rounded-lg border border-dashed border-white/10 p-2">

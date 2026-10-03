@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { integer, parseProfile, parseLineup, parseReport } from "../lib/validation.ts";
+import { integer, parseProfile, parseLineup, parseReport, teamName, ValidationError } from "../lib/validation.ts";
 const form = () => { const f = new FormData(); f.set("name", "  Ada Yılmaz "); f.set("position", "MID"); return f; };
 test("profile update whitelists editable fields, never role or stats", () => {
   const f = form(); f.set("ovrRating", "99"); f.set("goals", "900"); f.set("role", "CAPTAIN"); f.set("userId", "someone-else");
@@ -27,4 +27,32 @@ test("profile validates number, name, position and normalizes phone", () => {
   assert.equal(parseProfile(f).phone, "+905551234567");
   for (const [key, value] of [["name", " "], ["phone", "abc"], ["position", "ADMIN"], ["jerseyNumber", "100"]]) { const invalid = form(); invalid.set(key, value); assert.throws(() => parseProfile(invalid)); }
   for (const value of [null, "", "1.5", "NaN", -1, Infinity]) assert.throws(() => integer(value, "Skor", 0, 99));
+});
+// --- custom team names ------------------------------------------------------
+// The field is optional: clearing it must fall back to the platform default
+// instead of failing, and markup must never reach the database.
+
+test("blank team names fall back to the platform defaults", () => {
+  assert.equal(teamName("", "A"), "A Takımı");
+  assert.equal(teamName("   ", "B"), "B Takımı");
+  assert.equal(teamName(undefined, "A"), "A Takımı");
+});
+
+test("team names are trimmed and inner whitespace collapsed", () => {
+  assert.equal(teamName("  Gece  Yıldızları  ", "A"), "Gece Yıldızları");
+  assert.equal(teamName("Boğaz\tKaptanları", "B"), "Boğaz Kaptanları");
+});
+
+test("markup and control characters are stripped from team names", () => {
+  assert.equal(teamName("<script>alert(1)</script>", "A"), "scriptalert(1)/script");
+  assert.equal(teamName("Yıldız\u0007 Kulübü", "B"), "Yıldız Kulübü");
+});
+
+test("team names longer than 30 characters are rejected", () => {
+  assert.equal(teamName("a".repeat(30), "A").length, 30);
+  assert.throws(() => teamName("a".repeat(31), "A"), ValidationError);
+});
+
+test("the two team defaults stay distinct", () => {
+  assert.notEqual(teamName("", "A"), teamName("", "B"));
 });

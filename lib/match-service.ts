@@ -1,14 +1,17 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { parseLineup, parseReport, text, ValidationError } from "./validation.ts";
+import { parseLineup, parseReport, teamName, text, ValidationError } from "./validation.ts";
 
 // Not a Server Action: callers supply the authenticated server-side user ID.
-export async function createGlobalMatch(db: PrismaClient, userId: string, input: { requestId: unknown; date: unknown; lineup: unknown }) {
+export async function createGlobalMatch(db: PrismaClient, userId: string, input: { requestId: unknown; date: unknown; lineup: unknown; teamAName?: unknown; teamBName?: unknown }) {
   const id = text(input.requestId, "İşlem kimliği", 36, 36);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new ValidationError("Geçersiz işlem kimliği.");
   const dateText = text(input.date, "Maç tarihi", 10, 40);
   const date = new Date(dateText);
   if (!Number.isFinite(date.getTime()) || date.getTime() < Date.now() - 86_400_000 || date.getTime() > Date.now() + 365 * 86_400_000) throw new ValidationError("Maç tarihi son 24 saat ile gelecek bir yıl arasında olmalıdır.");
   const lineup = parseLineup(input.lineup);
+  const nameA = teamName(input.teamAName, "A");
+  const nameB = teamName(input.teamBName, "B");
+  if (nameA === nameB) throw new ValidationError("Takım adları birbirinden farklı olmalıdır.");
   // New matches always count towards the live season.
   const activeSeasonId = await db.season.findFirst({ where: { isActive: true }, select: { id: true } }).then(row => row?.id ?? null);
   const user = await db.user.findUnique({ where: { id: userId }, select: { role: true } });
@@ -23,7 +26,7 @@ export async function createGlobalMatch(db: PrismaClient, userId: string, input:
   const ratings = new Map(profiles.map(p => [p.id, p.ovrRating]));
   try {
     await db.match.create({ data: {
-      id, date, createdById: userId, status: "ONGOING", seasonId: activeSeasonId,
+      id, date, createdById: userId, status: "ONGOING", seasonId: activeSeasonId, teamAName: nameA, teamBName: nameB,
       players: { create: lineup.map(p => ({ playerProfileId: p.id, team: p.team, position: p.position, ovrAtMatch: ratings.get(p.id)! })) },
     } });
   } catch (error) {
@@ -73,4 +76,32 @@ export async function reportGlobalMatch(db: PrismaClient, userId: string, matchI
     }
     return match.id;
   }, { maxWait: 10_000, timeout: 30_000 });
+}
+
+/**
+ * Deletes a match that the given user created.
+ *
+ * Authorisation is deliberately narrow: only the captain who created the match
+ * may delete it, and it must belong to the global (non-group) archive.
+ *
+ * History is never rewritten. Career counters on PlayerProfile and the
+ * per-season lines are left exactly as they are, so the remaining matches keep
+ * their meaning; only the match, its MatchPlayer rows and the archive entry go
+ * away. This is why the deletion is surfaced as irreversible in the UI.
+ */
+export async function deleteGlobalMatch(db: PrismaClient, userId: string, matchId: string) {
+  if (!matchId) throw new ValidationError("Maç bulunamadı.");
+  return db.$transaction(async (tx) => {
+    const user = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
+    if (user?.role !== "CAPTAIN") throw new ValidationError("Maç silmek için kaptan yetkisi gerekiyor.");
+    const match = await tx.match.findUnique({ where: { id: matchId }, select: { id: true, createdById: true, groupId: true, status: true } });
+    if (!match) throw new ValidationError("Bu maç zaten silinmiş.");
+    if (match.groupId !== null) throw new ValidationError("Grup maçları bu ekrandan silinemez.");
+    // Ownership is checked server-side; hiding the button in the UI is not enough.
+    if (match.createdById !== userId) throw new ValidationError("Yalnızca bu maçı kuran kaptan silebilir.");
+    // MatchPlayer rows cascade; PlayerProfile and PlayerSeasonStat rows do not
+    // reference the match, so historical goals/assists/MOTM survive untouched.
+    await tx.match.delete({ where: { id: matchId } });
+    return match.id;
+  });
 }

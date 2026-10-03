@@ -61,7 +61,7 @@ try {
   const roster = page.locator("aside");
   for (const name of ["Captain Updated", "Test Player", ...Array.from({ length: 8 }, (_, i) => `Test Outfield ${i}`)]) await roster.getByRole("button", { name: new RegExp(`^${name},`) }).click();
   await page.getByRole("button", { name: "Takımları dengele" }).click();
-  await expect(page.getByRole("heading", { name: "Takım A", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "A Takımı", exact: false })).toBeVisible();
   const sourceCard = page.locator('[draggable="true"]').filter({ hasText: "Test Outfield 0" });
   const targetCard = page.locator('[draggable="true"]').filter({ hasText: "Test Outfield 1" });
   await sourceCard.dragTo(targetCard);
