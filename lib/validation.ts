@@ -54,6 +54,18 @@ export function parseLineup(value: unknown) {
   return rows;
 }
 
+export function parseCrewName(form: FormData) {
+  const name = text(form.get("name"), "Ekip adı", 3, 40);
+  // Collapse repeated spaces so "A  Takımı" and "A Takımı" are the same crew.
+  return { name: name.replace(/\s+/g, " ") };
+}
+
+export function parseCrewRequestMessage(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const message = text(value, "Mesaj", 2, 200);
+  return message.replace(/\s+/g, " ");
+}
+
 export function parseReport(value: unknown) {
   const data = record(value);
   const scoreA = integer(data.scoreA, "A takımı skoru", 0, 99);

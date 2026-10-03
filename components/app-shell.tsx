@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useId, useState } from "react";
 import { signIn, signOut } from "next-auth/react";
-import { ArrowUpRight, CircleDot, LayoutDashboard, LoaderCircle, LogOut, Menu, Plus, Search, Shield, Trophy, UserRound, Users } from "lucide-react";
+import { ArrowUpRight, CircleDot, LayoutDashboard, LoaderCircle, LogOut, Menu, Plus, Search, Shield, Trophy, UserRound, Users, UsersRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -15,7 +15,7 @@ import { positions, type RosterPlayer } from "@/lib/football";
 import { cn } from "@/lib/utils";
 
 type ShellUser = { id: string; name?: string | null; image?: string | null; role: "PLAYER" | "CAPTAIN" };
-const navigation = [{ href: "/", label: "Genel Bakış", icon: LayoutDashboard }, { href: "/yeni-mac", label: "Yeni Maç", icon: CircleDot }, { href: "/profil", label: "Oyuncu Profilim", icon: UserRound }];
+const navigation = [{ href: "/", label: "Genel Bakış", icon: LayoutDashboard }, { href: "/ekipler", label: "Ekipler", icon: UsersRound }, { href: "/yeni-mac", label: "Yeni Maç", icon: CircleDot }, { href: "/profil", label: "Oyuncu Profilim", icon: UserRound }];
 
 export function AuthButton({ logout = false }: { logout?: boolean }) {
   const [pending, setPending] = useState(false);

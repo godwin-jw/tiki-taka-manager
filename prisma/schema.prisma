@@ -32,6 +32,20 @@ enum Team {
   B
 }
 
+// Membership role inside a crew.
+enum CrewRole {
+  OWNER
+  CAPTAIN
+  MEMBER
+}
+
+// Lifecycle of a request to join a crew.
+enum CrewRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
 model User {
   id            String    @id @default(cuid())
   name          String?
@@ -43,13 +57,17 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  accounts       Account[]
-  sessions       Session[]
-  ownedGroups    Group[]              @relation("GroupCaptain")
-  profiles       GroupPlayerProfile[]
-  playerProfile  PlayerProfile?
-  createdMatches Match[]              @relation("MatchCreator")
-  playerRatings  PlayerRating[]
+  accounts             Account[]
+  sessions             Session[]
+  ownedGroups          Group[]              @relation("GroupCaptain")
+  profiles             GroupPlayerProfile[]
+  playerProfile        PlayerProfile?
+  createdMatches       Match[]              @relation("MatchCreator")
+  playerRatings        PlayerRating[]
+  ownedCrews           Crew[]               @relation("CrewOwner")
+  crewMemberships      CrewMember[]
+  sentCrewRequests     CrewRequest[]        @relation("CrewRequestSender")
+  reviewedCrewRequests CrewRequest[]        @relation("CrewRequestReviewer")
 }
 
 model Group {
@@ -113,12 +131,120 @@ model PlayerProfile {
 
   appearances MatchPlayer[]
   ratings     PlayerRating[]
+  seasonStats PlayerSeasonStat[]
 
   @@index([ovrRating(sort: Desc), id])
   @@index([goals(sort: Desc), id])
   @@index([assists(sort: Desc), id])
   @@index([motmCount(sort: Desc), id])
   @@map("GlobalPlayerProfile")
+}
+
+// A persistent team ("Pro Clubs" crew) of players on the platform.
+model Crew {
+  id        String   @id @default(cuid())
+  name      String
+  logo      String?
+  createdAt DateTime @default(now())
+
+  // The owner is always a member too; see the seeding logic in the service.
+  ownerId String
+  owner   User   @relation("CrewOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  members  CrewMember[]
+  requests CrewRequest[]
+  matches  Match[]
+
+  @@index([name])
+  @@map("Crew")
+}
+
+// One row per user per crew. Guarantees a single active membership.
+model CrewMember {
+  id       String   @id @default(cuid())
+  role     CrewRole @default(MEMBER)
+  joinedAt DateTime @default(now())
+
+  crewId String
+  crew   Crew   @relation(fields: [crewId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([crewId, userId])
+  @@index([userId])
+  @@map("CrewMember")
+}
+
+// A player's request to join a crew, reviewed by that crew's captain.
+model CrewRequest {
+  id         String            @id @default(cuid())
+  status     CrewRequestStatus @default(PENDING)
+  message    String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  // Set when the request leaves the PENDING state.
+  resolvedAt DateTime?
+
+  crewId String
+  crew   Crew   @relation(fields: [crewId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation("CrewRequestSender", fields: [userId], references: [id], onDelete: Cascade)
+
+  // Set when a captain accepts or rejects the request.
+  reviewedById String?
+  reviewedBy   User?   @relation("CrewRequestReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  // Only one open request per person and crew, so the same request is
+  // updated instead of stacking up duplicates.
+  @@unique([crewId, userId])
+  @@index([crewId, status])
+  @@index([userId, status])
+  @@map("CrewRequest")
+}
+
+// A competition period. Exactly one season is expected to be active.
+model Season {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  startDate DateTime
+  endDate   DateTime
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  matches     Match[]
+  playerStats PlayerSeasonStat[]
+
+  @@index([isActive])
+  @@map("Season")
+}
+
+// Per-season statistics, so each season can be compared and reset.
+model PlayerSeasonStat {
+  id            String   @id @default(cuid())
+  ovrRating     Float    @default(0)
+  goals         Int      @default(0)
+  assists       Int      @default(0)
+  matchesPlayed Int      @default(0)
+  motmCount     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  seasonId String
+  season   Season @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+
+  playerProfileId String
+  playerProfile   PlayerProfile @relation(fields: [playerProfileId], references: [id], onDelete: Cascade)
+
+  // One stat line per player per season.
+  @@unique([seasonId, playerProfileId])
+  @@index([playerProfileId])
+  @@index([seasonId, goals(sort: Desc)])
+  @@index([seasonId, assists(sort: Desc)])
+  @@index([seasonId, motmCount(sort: Desc)])
+  @@index([seasonId, ovrRating(sort: Desc)])
+  @@map("PlayerSeasonStat")
 }
 
 // One equally weighted, editable assessment per voter and global player.
@@ -169,6 +295,9 @@ model Match {
   date        DateTime
   teamAScore  Int         @default(0)
   teamBScore  Int         @default(0)
+  // Custom display names; defaults keep the "A Takımı / B Takımı" wording.
+  teamAName   String      @default("A Takımı")
+  teamBName   String      @default("B Takımı")
   isCompleted Boolean     @default(false)
   status      MatchStatus @default(ONGOING)
   createdAt   DateTime    @default(now())
@@ -183,9 +312,19 @@ model Match {
   matchDetails Json?
   players      MatchPlayer[]
 
+  // The crew that organised the match, used for crew-scoped archives.
+  crewId String?
+  crew   Crew?   @relation(fields: [crewId], references: [id], onDelete: SetNull)
+
+  // Season the match counts towards; drives per-season statistics.
+  seasonId String?
+  season   Season? @relation(fields: [seasonId], references: [id], onDelete: SetNull)
+
   @@index([status, date(sort: Desc)])
   @@index([groupId, status])
   @@index([createdById])
+  @@index([crewId, date(sort: Desc)])
+  @@index([seasonId, status])
 }
 
 model MatchPlayer {

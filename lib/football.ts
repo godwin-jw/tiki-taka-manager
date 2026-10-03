@@ -35,6 +35,43 @@ export function snakeDraft(players: RosterPlayer[]): DraftPlayer[] {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Crew domain rules. Shared by the pages and the server actions so membership
+// and captain permissions are decided in exactly one place.
+// ---------------------------------------------------------------------------
+
+export type CrewRoleName = "OWNER" | "CAPTAIN" | "MEMBER";
+
+/** Roles allowed to review join requests and manage the roster. */
+export const CREW_MANAGERS: readonly CrewRoleName[] = ["OWNER", "CAPTAIN"];
+
+export function canManageCrew(role: CrewRoleName | null | undefined): boolean {
+  return role !== null && role !== undefined && CREW_MANAGERS.includes(role);
+}
+
+/**
+ * Lower-cased, whitespace-collapsed key used for case-insensitive crew search
+ * on both Turkish and Latin text ("Kartal SK" and "kartalsk" must match).
+ */
+export function crewSearchKey(name: string): string {
+  return name.trim().replace(/\s+/g, " ").toLocaleLowerCase("tr-TR");
+}
+
+/** Maximum members per crew; keeps the draft pools usable for a 5-a-side game. */
+export const CREW_MEMBER_LIMIT = 30;
+
+/**
+ * Orders crew leaderboard rows by a chosen metric. Ties fall back to OVR and
+ * then the Turkish name so the table never reorders between renders.
+ */
+export function sortByStats<T extends { name: string; ovrRating: number }>(
+  rows: T[],
+  metric: "ovrRating" | "goals" | "assists" | "motmCount",
+): T[] {
+  const value = (row: T) => (metric === "ovrRating" ? row.ovrRating : (row as unknown as Record<string, number>)[metric] ?? 0);
+  return [...rows].sort((a, b) => value(b) - value(a) || b.ovrRating - a.ovrRating || a.name.localeCompare(b.name, "tr-TR"));
+}
+
 export function teamAverage(players: Pick<DraftPlayer, "team" | "ovrRating">[], team: Team) {
   const squad = players.filter(p => p.team === team);
   return squad.length ? squad.reduce((sum, p) => sum + p.ovrRating, 0) / squad.length : 0;

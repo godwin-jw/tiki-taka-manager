@@ -1,0 +1,213 @@
+import "server-only";
+
+import { prisma } from "@/lib/prisma";
+import { CREW_MEMBER_LIMIT, canManageCrew, type CrewRoleName } from "@/lib/football";
+
+export class CrewError extends Error {}
+
+/** Shape used by the crew card grid on /ekipler. */
+export async function listCrews(query?: string) {
+  const search = query?.trim() ?? "";
+  const crews = await prisma.crew.findMany({
+    // Case-insensitive contains search; most members first, then alphabetical.
+    where: search ? { name: { contains: search, mode: "insensitive" } } : undefined,
+    orderBy: [{ members: { _count: "desc" } }, { name: "asc" }],
+    take: 60,
+    select: {
+      id: true,
+      name: true,
+      logo: true,
+      createdAt: true,
+      owner: { select: { id: true, name: true, image: true } },
+      _count: { select: { members: true, requests: { where: { status: "PENDING" } } } },
+    },
+  });
+  return crews.map((crew) => ({
+    id: crew.id,
+    name: crew.name,
+    logo: crew.logo,
+    ownerName: crew.owner.name ?? "Bilinmiyor",
+    ownerImage: crew.owner.image,
+    memberCount: crew._count.members,
+    pendingCount: crew._count.requests,
+  }));
+}
+
+/** The viewer's membership in a crew, or null when they are not a member. */
+export async function getViewerMembership(crewId: string, userId: string) {
+  return prisma.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { role: true, joinedAt: true } });
+}
+
+export async function getCrewsOfUser(userId: string) {
+  return prisma.crew.findMany({
+    where: { members: { some: { userId } } },
+    orderBy: { name: "asc" },
+    select: { id: true, name: true, logo: true, _count: { select: { members: true } } },
+  });
+}
+
+export async function getCrewDetail(crewId: string, viewerId: string) {
+  const crew = await prisma.crew.findUnique({
+    where: { id: crewId },
+    select: {
+      id: true,
+      name: true,
+      logo: true,
+      createdAt: true,
+      owner: { select: { id: true, name: true, image: true } },
+      members: {
+        orderBy: [{ joinedAt: "asc" }],
+        select: {
+          id: true,
+          role: true,
+          joinedAt: true,
+          user: {
+            select: {
+              id: true,
+              name: true,
+              image: true,
+              playerProfile: { select: { position: true, ovrRating: true, goals: true, assists: true, matchesPlayed: true, motmCount: true } },
+            },
+          },
+        },
+      },
+      _count: { select: { members: true } },
+    },
+  });
+  if (!crew) return null;
+
+  // Only members see the roster and the crew leaderboards.
+  const membership = await getViewerMembership(crewId, viewerId);
+  const isMember = membership !== null;
+  const isManager = canManageCrew(membership?.role);
+
+  const pendingRequests = isManager
+    ? await prisma.crewRequest.findMany({
+        where: { crewId, status: "PENDING" },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          message: true,
+          createdAt: true,
+          user: { select: { id: true, name: true, image: true, playerProfile: { select: { ovrRating: true, position: true } } } },
+        },
+      })
+    : [];
+
+  const viewerRequest = await prisma.crewRequest.findUnique({
+    where: { crewId_userId: { crewId, userId: viewerId } },
+    select: { status: true },
+  });
+
+  const roster = crew.members.map((member) => ({
+    memberId: member.id,
+    role: member.role as CrewRoleName,
+    userId: member.user.id,
+    name: member.user.name ?? "Oyuncu",
+    image: member.user.image,
+    position: member.user.playerProfile?.position ?? ("MID" as const),
+    ovrRating: member.user.playerProfile?.ovrRating ?? 0,
+    goals: member.user.playerProfile?.goals ?? 0,
+    assists: member.user.playerProfile?.assists ?? 0,
+    matchesPlayed: member.user.playerProfile?.matchesPlayed ?? 0,
+    motmCount: member.user.playerProfile?.motmCount ?? 0,
+    hasProfile: member.user.playerProfile !== null,
+  }));
+
+  return {
+    id: crew.id,
+    name: crew.name,
+    logo: crew.logo,
+    createdAt: crew.createdAt,
+    ownerName: crew.owner.name ?? "Bilinmiyor",
+    ownerId: crew.owner.id,
+    memberCount: crew._count.members,
+    isMember,
+    isManager,
+    isOwner: membership?.role === "OWNER",
+    membershipRole: (membership?.role ?? null) as CrewRoleName | null,
+    viewerRequestStatus: viewerRequest?.status ?? null,
+    roster: isMember ? roster : [],
+    pendingRequests,
+    memberLimit: CREW_MEMBER_LIMIT,
+  };
+}
+
+/**
+ * Every write re-checks the permission inside the transaction so a stale client
+ * can never approve a request it is no longer allowed to approve.
+ */
+export async function createCrew(userId: string, name: string) {
+  return prisma.$transaction(async (tx) => {
+    const duplicate = await tx.crew.findFirst({ where: { name: { equals: name, mode: "insensitive" } }, select: { id: true } });
+    if (duplicate) throw new CrewError("Bu isimde bir ekip zaten var.");
+    // The owner is seeded as an OWNER member so listing and "my crews" queries
+    // never depend on a second code path.
+    return tx.crew.create({ data: { name, ownerId: userId, members: { create: { userId, role: "OWNER" } } }, select: { id: true, name: true } });
+  });
+}
+
+export async function requestToJoin(userId: string, crewId: string, message: string | null) {
+  return prisma.$transaction(async (tx) => {
+    const crew = await tx.crew.findUnique({ where: { id: crewId }, select: { ownerId: true, _count: { select: { members: true } } } });
+    if (!crew) throw new CrewError("Ekip bulunamadı.");
+    if (crew.ownerId === userId) throw new CrewError("Kendi ekibine katılma isteği gönderemezsin.");
+    const membership = await tx.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { id: true } });
+    if (membership) throw new CrewError("Zaten bu ekibin üyesisin.");
+    if (crew._count.members >= CREW_MEMBER_LIMIT) throw new CrewError(`Ekip dolu (en fazla ${CREW_MEMBER_LIMIT} üye).`);
+    // One row per crew and user: re-requesting refreshes the existing request.
+    return tx.crewRequest.upsert({
+      where: { crewId_userId: { crewId, userId } },
+      create: { crewId, userId, message, status: "PENDING" },
+      update: { message, status: "PENDING", resolvedAt: null, reviewedById: null },
+      select: { id: true, status: true },
+    });
+  });
+}
+
+export async function cancelCrewRequest(userId: string, crewId: string) {
+  const result = await prisma.crewRequest.deleteMany({ where: { crewId, userId, status: "PENDING" } });
+  if (result.count === 0) throw new CrewError("Bekleyen isteğin bulunamadı.");
+}
+
+async function assertManager(tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0], crewId: string, userId: string) {
+  const membership = await tx.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { role: true } });
+  if (!canManageCrew(membership?.role)) throw new CrewError("Yalnızca ekip kaptanı istekleri yönetebilir.");
+}
+
+/** Approves a request and adds the player as a MEMBER atomically. */
+export async function approveCrewRequest(userId: string, requestId: string) {
+  return prisma.$transaction(async (tx) => {
+    const request = await tx.crewRequest.findUnique({ where: { id: requestId }, select: { id: true, status: true, crewId: true, userId: true } });
+    if (!request) throw new CrewError("İstek bulunamadı.");
+    if (request.status !== "PENDING") throw new CrewError("Bu istek zaten sonuçlanmış.");
+    await assertManager(tx, request.crewId, userId);
+
+    const count = await tx.crewMember.count({ where: { crewId: request.crewId } });
+    if (count >= CREW_MEMBER_LIMIT) throw new CrewError("Ekip dolu.");
+
+    await tx.crewMember.upsert({
+      where: { crewId_userId: { crewId: request.crewId, userId: request.userId } },
+      create: { crewId: request.crewId, userId: request.userId, role: "MEMBER" },
+      update: {},
+    });
+    return tx.crewRequest.update({ where: { id: request.id }, data: { status: "ACCEPTED", reviewedById: userId, resolvedAt: new Date() }, select: { id: true } });
+  });
+}
+
+export async function rejectCrewRequest(userId: string, requestId: string) {
+  return prisma.$transaction(async (tx) => {
+    const request = await tx.crewRequest.findUnique({ where: { id: requestId }, select: { id: true, status: true, crewId: true } });
+    if (!request) throw new CrewError("İstek bulunamadı.");
+    if (request.status !== "PENDING") throw new CrewError("Bu istek zaten sonuçlanmış.");
+    await assertManager(tx, request.crewId, userId);
+    return tx.crewRequest.update({ where: { id: request.id }, data: { status: "REJECTED", reviewedById: userId, resolvedAt: new Date() }, select: { id: true } });
+  });
+}
+
+export async function leaveCrew(userId: string, crewId: string) {
+  const membership = await prisma.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { id: true, role: true } });
+  if (!membership) throw new CrewError("Bu ekibin üyesi değilsin.");
+  if (membership.role === "OWNER") throw new CrewError("Ekip sahibi ekibten ayrılamaz.");
+  await prisma.crewMember.delete({ where: { id: membership.id } });
+}

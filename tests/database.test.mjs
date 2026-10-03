@@ -44,13 +44,22 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     cpSync("prisma/migrations/20260905010000_global_profiles_google_auth", path.join(migrations, "20260905010000_global_profiles_google_auth"), { recursive: true });
     cpSync("prisma/migrations/20261003000000_global_player_ratings", path.join(migrations, "20261003000000_global_player_ratings"), { recursive: true });
     migrate();
+    // Crew/season tables must upgrade cleanly on top of the legacy data above.
+    cpSync("prisma/migrations/20261010000000_crews_and_seasons", path.join(migrations, "20261010000000_crews_and_seasons"), { recursive: true });
+    migrate();
 
     const legacy = await db.user.findUniqueOrThrow({ where: { id: "legacy" }, include: { playerProfile: true, profiles: true } });
     assert.equal(legacy.role, "CAPTAIN");
     assert.equal(legacy.profiles.length, 1);
     assert.equal(legacy.playerProfile.goals, 3);
     assert.equal(legacy.playerProfile.position, "GK");
-    assert.equal((await db.match.findUniqueOrThrow({ where: { id: "old-match" } })).status, "COMPLETED");
+    const legacyMatch = await db.match.findUniqueOrThrow({ where: { id: "old-match" } });
+    assert.equal(legacyMatch.status, "COMPLETED");
+    // Existing matches keep the default team names after the crew/season upgrade.
+    assert.equal(legacyMatch.teamAName, "A Tak\u0131m\u0131");
+    assert.equal(legacyMatch.teamBName, "B Tak\u0131m\u0131");
+    assert.equal(legacyMatch.seasonId, null);
+    assert.equal(legacyMatch.crewId, null);
 
     const adapter = createAuthAdapter(db);
     const user = await adapter.createUser({ email: "google@example.com", emailVerified: null, name: "Player", image: null, role: "CAPTAIN" });
