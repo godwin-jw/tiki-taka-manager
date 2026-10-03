@@ -83,7 +83,7 @@ export default async function ProfilePage({ searchParams }: { searchParams: Prom
           <CardTitle className="flex items-center gap-2 text-base"><CalendarRange className="size-5 text-emerald-400" />Sezon performansı</CardTitle>
         </CardHeader>
         <CardContent className="px-6 pb-6">
-          <SeasonPicker showLabel={false} seasons={seasons} selectedId={selectedSeason?.id ?? ""} hrefFor={(seasonId) => `/profil?season=${seasonId}`} />
+          <SeasonPicker showLabel={false} seasons={seasons} selectedId={selectedSeason?.id ?? ""} basePath="/profil" />
           <div className="mt-5">
             {seasonStats.length === 0
               ? <p className="text-sm text-zinc-400">Bu sezonda henüz maç raporu yok.</p>

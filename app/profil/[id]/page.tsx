@@ -110,7 +110,7 @@ export default async function PublicProfilePage({ params, searchParams }: { para
           <CardTitle className="flex items-center gap-2"><CalendarRange className="size-5 text-emerald-400" />Sezon seçici</CardTitle>
         </CardHeader>
         <CardContent className="px-6 pb-6">
-          <SeasonPicker showLabel={false} seasons={seasons} selectedId={selected?.id ?? ""} hrefFor={(seasonId) => `/profil/${player.id}?season=${seasonId}`} />
+          <SeasonPicker showLabel={false} seasons={seasons} selectedId={selected?.id ?? ""} basePath={`/profil/${player.id}`} />
           {selected && <div className="mt-5"><SeasonReadOnlyNote seasonName={selected.name} isActive={selected.isActive} /></div>}
         </CardContent>
       </Card>
