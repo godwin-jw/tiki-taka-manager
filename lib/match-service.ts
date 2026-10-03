@@ -9,6 +9,8 @@ export async function createGlobalMatch(db: PrismaClient, userId: string, input:
   const date = new Date(dateText);
   if (!Number.isFinite(date.getTime()) || date.getTime() < Date.now() - 86_400_000 || date.getTime() > Date.now() + 365 * 86_400_000) throw new ValidationError("Maç tarihi son 24 saat ile gelecek bir yıl arasında olmalıdır.");
   const lineup = parseLineup(input.lineup);
+  // New matches always count towards the live season.
+  const activeSeasonId = await db.season.findFirst({ where: { isActive: true }, select: { id: true } }).then(row => row?.id ?? null);
   const user = await db.user.findUnique({ where: { id: userId }, select: { role: true } });
   if (user?.role !== "CAPTAIN") throw new ValidationError("Maç oluşturmak için kaptan olmalısın.");
   const existing = await db.match.findUnique({ where: { id }, select: { createdById: true } });
@@ -21,7 +23,7 @@ export async function createGlobalMatch(db: PrismaClient, userId: string, input:
   const ratings = new Map(profiles.map(p => [p.id, p.ovrRating]));
   try {
     await db.match.create({ data: {
-      id, date, createdById: userId, status: "ONGOING",
+      id, date, createdById: userId, status: "ONGOING", seasonId: activeSeasonId,
       players: { create: lineup.map(p => ({ playerProfileId: p.id, team: p.team, position: p.position, ovrAtMatch: ratings.get(p.id)! })) },
     } });
   } catch (error) {
@@ -58,7 +60,16 @@ export async function reportGlobalMatch(db: PrismaClient, userId: string, matchI
     for (const row of report.players) {
       const isMotm = row.id === report.motmId;
       await tx.matchPlayer.update({ where: { matchId_playerProfileId: { matchId, playerProfileId: row.id } }, data: { goals: row.goals, assists: row.assists, isMotm } });
-      await tx.playerProfile.update({ where: { id: row.id }, data: { goals: { increment: row.goals }, assists: { increment: row.assists }, matchesPlayed: { increment: 1 }, motmCount: { increment: isMotm ? 1 : 0 } } });
+      const updated = await tx.playerProfile.update({ where: { id: row.id }, data: { goals: { increment: row.goals }, assists: { increment: row.assists }, matchesPlayed: { increment: 1 }, motmCount: { increment: isMotm ? 1 : 0 } }, select: { ovrRating: true } });
+      // Mirror the same numbers onto the season line in this transaction, so a
+      // rolled-back report can never leave career and season totals disagreeing.
+      if (match.seasonId) {
+        await tx.playerSeasonStat.upsert({
+          where: { seasonId_playerProfileId: { seasonId: match.seasonId, playerProfileId: row.id } },
+          create: { seasonId: match.seasonId, playerProfileId: row.id, goals: row.goals, assists: row.assists, matchesPlayed: 1, motmCount: isMotm ? 1 : 0, ovrRating: updated.ovrRating },
+          update: { goals: { increment: row.goals }, assists: { increment: row.assists }, matchesPlayed: { increment: 1 }, motmCount: { increment: isMotm ? 1 : 0 }, ovrRating: updated.ovrRating },
+        });
+      }
     }
     return match.id;
   }, { maxWait: 10_000, timeout: 30_000 });

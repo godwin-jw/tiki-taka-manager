@@ -4,6 +4,7 @@ import "./globals.css";
 import { Suspense } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getRoster, getSession } from "@/lib/data";
+import { ensureActiveSeason } from "@/lib/season-service";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const geistSans = Geist({
@@ -23,6 +24,8 @@ export const metadata: Metadata = {
 
 async function Platform({ children }: { children: React.ReactNode }) {
   const [session, players] = await Promise.all([getSession(), getRoster()]);
+  // Bootstraps "Sezon 1" the first time a signed-in user opens the app.
+  if (session?.user) await ensureActiveSeason();
   return <AppShell user={session?.user ?? null} players={players}>{children}</AppShell>;
 }
 
