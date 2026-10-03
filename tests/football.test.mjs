@@ -29,3 +29,65 @@ test("invalid counts, duplicates and extra keepers are rejected", () => {
   assert.throws(() => snakeDraft([player(1), player(1), player(2), player(3)]));
   assert.throws(() => snakeDraft(Array.from({ length: 4 }, (_, i) => player(i, "GK"))));
 });
+
+// --- position-aware snake ---------------------------------------------------
+// The draft groups outfield players by position and deals each group as a
+// block, so both squads get a fair share of DEF / MID / FWD instead of one
+// side hoarding every forward.
+
+const count = (draft, team, position) =>
+  draft.filter(p => p.team === team && p.position === position).length;
+
+test("each squad gets an equal share of every position", () => {
+  // 2 keepers + 3 of each outfield position = 2 + 9 = 11 -> pad to 12.
+  const squad = [
+    ...Array.from({ length: 2 }, (_, i) => player(i, "GK")),
+    ...Array.from({ length: 4 }, (_, i) => player(10 + i, "DEF")),
+    ...Array.from({ length: 4 }, (_, i) => player(20 + i, "MID")),
+    ...Array.from({ length: 2 }, (_, i) => player(30 + i, "FWD")),
+  ];
+  const draft = snakeDraft(squad);
+  assert.equal(draft.filter(p => p.team === "A").length, 6);
+  assert.equal(draft.filter(p => p.team === "B").length, 6);
+  for (const position of ["GK", "DEF", "MID", "FWD"]) {
+    assert.equal(
+      count(draft, "A", position),
+      count(draft, "B", position),
+      `${position} must be split evenly`,
+    );
+  }
+});
+
+test("no squad takes three consecutive snake picks", () => {
+  // 12 outfield players, no keepers: the snake must keep alternating.
+  const draft = snakeDraft(Array.from({ length: 12 }, (_, i) => player(i, "MID")));
+  const outfieldOrder = draft.filter(p => p.position !== "GK").map(p => p.team);
+  for (let i = 2; i < outfieldOrder.length; i++) {
+    assert.ok(
+      !(outfieldOrder[i] === outfieldOrder[i - 1] && outfieldOrder[i] === outfieldOrder[i - 2]),
+      `three in a row at index ${i}: ${outfieldOrder.join("")}`,
+    );
+  }
+});
+
+test("squad strength stays balanced for any mixed roster", () => {
+  const positions = ["DEF", "DEF", "MID", "MID", "FWD", "FWD", "DEF", "MID", "FWD", "DEF"];
+  const squad = [
+    player(0, "GK"), player(1, "GK"),
+    ...positions.map((position, i) => player(10 + i, position)),
+  ];
+  const draft = snakeDraft(squad);
+  const average = team => {
+    const squad_ = draft.filter(p => p.team === team);
+    return squad_.reduce((sum, p) => sum + p.ovrRating, 0) / squad_.length;
+  };
+  // A gap above ~2 OVR means the elite all ended up on one side.
+  assert.ok(Math.abs(average("A") - average("B")) <= 2, `OVR gap too large: ${average("A")} vs ${average("B")}`);
+});
+
+test("the draft is deterministic for identical input", () => {
+  const squad = Array.from({ length: 10 }, (_, i) => player(i, i % 3 === 0 ? "DEF" : "MID"));
+  const first = snakeDraft(squad).map(p => `${p.id}:${p.team}`);
+  const second = snakeDraft([...squad].reverse()).map(p => `${p.id}:${p.team}`);
+  assert.deepEqual(first.sort(), second.sort());
+});

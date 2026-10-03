@@ -3,6 +3,7 @@
 import { useActionState, useState } from "react";
 import { Check, LoaderCircle, Shuffle, Users, X } from "lucide-react";
 import { useRoster } from "@/components/roster-context";
+import { MobilePlayerPicker } from "@/components/mobile-player-picker";
 import { TacticalPitch } from "@/components/tactical-pitch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,6 +33,7 @@ export function MatchBuilder({ requestId }: { requestId: string }) {
   return <div className="space-y-6"><section className="glass space-y-5 p-6"><div className="flex flex-wrap items-end justify-between gap-5"><div className="space-y-2"><Label htmlFor="player-count">Toplam oyuncu</Label><select id="player-count" value={capacity} onChange={e => setCapacity(Number(e.target.value))} disabled={pending} className="field-select w-44">{[4, 6, 8, 10, 12, 14, 16, 18, 20, 22].map(n => <option key={n} value={n}>{n} kişi · {n / 2} vs {n / 2}</option>)}</select></div><div className="flex gap-2"><Button type="button" variant="ghost" onClick={clear} disabled={pending || !selectedIds.length}>Seçimi temizle</Button><Button type="button" onClick={generate} disabled={pending || selectedIds.length !== capacity}><Shuffle />Takımları dengele</Button></div></div>
       <div className="flex items-center gap-2 text-sm text-zinc-400"><Users className="size-4 text-emerald-400" />{selectedIds.length} / {capacity} seçildi <span className="text-xs text-zinc-500">· Sol havuzdan veya mobil menüden oyuncu işaretle.</span></div><div className="h-1.5 overflow-hidden rounded-full bg-zinc-800"><div className="h-full bg-emerald-400 transition-all" style={{ width: `${selectedIds.length / capacity * 100}%` }} /></div>
       <div className="flex flex-wrap gap-2">{players.filter(p => selectedIds.includes(p.id)).map(p => <button key={p.id} type="button" disabled={pending} onClick={() => toggle(p.id)} aria-label={`${p.name} seçimini kaldır`} className="flex items-center gap-2 rounded-lg border border-white/10 bg-zinc-800/50 px-3 py-2 text-xs">{p.name}<X className="size-3 text-zinc-400" /></button>)}</div>
+      <MobilePlayerPicker />
       {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
       {selectedIds.length > 0 && missingKeeper && <p className="text-xs text-amber-200">İki kaleci seçilmedi. Takımlar kurulabilir; eksik kaleci mevkisini taktik tahtasında atayabilirsin.</p>}
     </section>

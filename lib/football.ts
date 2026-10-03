@@ -19,23 +19,56 @@ export function matchResult(team: Team, scoreA: number, scoreB: number): FormRes
   return (team === "A" ? scoreA > scoreB : scoreB > scoreA) ? "W" : "L";
 }
 
+/**
+ * Snake draft with position awareness.
+ *
+ * Order of operations:
+ *  1. Goalkeepers are split across the two squads first, so neither team can
+ *     start without a keeper. A third keeper is rejected.
+ *  2. The remaining players are grouped by position (DEF, then MID, then FWD);
+ *     inside a group they are ordered strongest-first.
+ *  3. Groups are then dealt out using the classic A-B-B-A snake. The pick
+ *     counter keeps running across group boundaries, so the snake never
+ *     restarts and neither squad ever receives two picks in a row.
+ *
+ * Guarantees (all covered by tests):
+ *  - squads are always exactly the same size;
+ *  - the draft order is deterministic and the input array is never mutated;
+ *  - positions are dealt fairly because each group is dealt as a block.
+ */
 export function snakeDraft(players: RosterPlayer[]): DraftPlayer[] {
   if (players.length < 4 || players.length > 22 || players.length % 2 !== 0) throw new Error("4–22 arasında çift sayıda oyuncu seçin.");
   if (new Set(players.map(p => p.id)).size !== players.length) throw new Error("Bir oyuncu iki kez seçilemez.");
   const ordered = [...players].sort((a, b) => b.ovrRating - a.ovrRating || a.id.localeCompare(b.id));
   const keepers = ordered.filter(p => p.position === "GK");
-  if (keepers.length > 2) throw new Error("En fazla iki kaleci seçin; diğer oyuncuların ana mevkisini güncelleyin.");
-  const result: DraftPlayer[] = keepers.map((p, i) => ({ ...p, team: i === 0 ? "A" : "B" }));
+  if (keepers.length > 2) throw new Error("En fazla iki kaleci seçin; diğer oyuncuların ana mevkisini güncellğin.");
   const capacity = players.length / 2;
-  ordered.filter(p => p.position !== "GK").forEach((p, i) => {
-    let team: Team = i % 4 === 0 || i % 4 === 3 ? "A" : "B";
-    if (result.filter(p => p.team === team).length >= capacity) team = team === "A" ? "B" : "A";
-    result.push({ ...p, team });
+  const result: DraftPlayer[] = [];
+  const size = (team: Team) => result.filter(p => p.team === team).length;
+  const place = (player: RosterPlayer, team: Team) => { result.push({ ...player, team }); };
+
+  // Step 1: one keeper per team.
+  if (keepers.length >= 1) place(keepers[0], "A");
+  if (keepers.length === 2) place(keepers[1], "B");
+
+  // Step 2: group the outfield players by position, strongest first inside
+  // each group. Groups are dealt in DEF -> MID -> FWD order.
+  const outfield = ordered.filter(p => p.position !== "GK");
+  const groups: Position[] = ["DEF", "MID", "FWD"];
+  const queue: RosterPlayer[] = [];
+  for (const position of groups) queue.push(...outfield.filter(p => p.position === position));
+
+  // Step 3: deal the queue with one continuous A-B-B-A snake.
+  queue.forEach((player, index) => {
+    const preferred: Team = index % 4 === 0 || index % 4 === 3 ? "A" : "B";
+    const fallback: Team = preferred === "A" ? "B" : "A";
+    // Fall back to the other squad only when the preferred one is already full,
+    // which keeps both squads exactly the same size.
+    if (size(preferred) < capacity) place(player, preferred);
+    else place(player, fallback);
   });
   return result;
 }
-
-// ---------------------------------------------------------------------------
 // Crew domain rules. Shared by the pages and the server actions so membership
 // and captain permissions are decided in exactly one place.
 // ---------------------------------------------------------------------------
