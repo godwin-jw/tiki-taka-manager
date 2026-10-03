@@ -6,20 +6,48 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "prisma generate",
+    "typecheck": "next typegen && tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:validate": "prisma validate",
+    "db:migrate": "prisma migrate deploy",
+    "test:auth": "node --test tests/auth-policy.test.mjs",
+    "test": "node --test tests/auth-policy.test.mjs tests/football.test.mjs tests/validation.test.mjs tests/rating.test.mjs",
+    "test:e2e": "node --env-file=.env tests/e2e.mjs",
+    "test:local": "node tests/local-suite.mjs",
+    "test:db": "node --env-file=.env --test tests/database.test.mjs"
   },
   "dependencies": {
-    "next": "16.3.4",
+    "@auth/prisma-adapter": "^2.11.3",
+    "@prisma/client": "^5.22.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.41.0",
+    "next": "^16.3.8",
+    "next-auth": "^4.24.15",
+    "radix-ui": "^1.6.7",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "server-only": "^0.0.1",
+    "tailwind-merge": "^3.6.0",
+    "tw-animate-css": "^1.4.0"
+  },
+  "overrides": {
+    "next-auth": {
+      "@auth/core": "0.41.3"
+    }
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "embedded-postgres": "^18.4.0-beta.17",
     "eslint": "^9",
-    "eslint-config-next": "16.3.4",
+    "eslint-config-next": "^16.3.8",
+    "prisma": "^5.22.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

@@ -1,0 +1,138 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id            String          @id @default(cuid())
+  name          String?
+  email         String?         @unique
+  emailVerified DateTime?
+  phone         String?         @unique
+  image         String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+  ownedGroups   Group[]         @relation("GroupCaptain")
+  profiles      PlayerProfile[]
+}
+
+model Group {
+  id            String          @id @default(cuid())
+  name          String
+  inviteCode    String          @unique
+  isPremium     Boolean         @default(false)
+  createdAt     DateTime        @default(now())
+
+  captainId     String
+  captain       User            @relation("GroupCaptain", fields: [captainId], references: [id])
+  
+  players       PlayerProfile[]
+  matches       Match[]
+  ratings       Rating[]
+}
+
+model PlayerProfile {
+  id            String          @id @default(cuid())
+  positions     Json?           
+  ovrRating     Float           @default(0)
+  pace          Float           @default(0)
+  shooting      Float           @default(0)
+  passing       Float           @default(0)
+  dribbling     Float           @default(0)
+  defending     Float           @default(0)
+  physical      Float           @default(0)
+  goals         Int             @default(0)
+  assists       Int             @default(0)
+  matchesPlayed Int             @default(0)
+  motmCount     Int             @default(0)
+  createdAt     DateTime        @default(now())
+
+  userId        String
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  groupId       String
+  group         Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  ratingsGiven    Rating[] @relation("Rater")
+  ratingsReceived Rating[] @relation("Ratee")
+
+  @@unique([userId, groupId])
+}
+
+model Rating {
+  id            String   @id @default(cuid())
+  pace          Int      
+  shooting      Int      
+  passing       Int      
+  dribbling     Int      
+  defending     Int      
+  physical      Int      
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  groupId       String
+  group         Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  raterId       String
+  rater         PlayerProfile   @relation("Rater", fields: [raterId], references: [id], onDelete: Cascade)
+
+  rateeId       String
+  ratee         PlayerProfile   @relation("Ratee", fields: [rateeId], references: [id], onDelete: Cascade)
+
+  @@unique([raterId, rateeId, groupId])
+}
+
+model Match {
+  id           String   @id @default(cuid())
+  date         DateTime
+  teamAScore   Int      @default(0)
+  teamBScore   Int      @default(0)
+  isCompleted  Boolean  @default(false)
+  status       String   @default("ONGOING")
+
+  groupId      String
+  group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  matchDetails Json?    
+}
+
+model Account {
+  id                 String  @id @default(cuid())
+  userId             String
+  type               String
+  provider           String
+  providerAccountId  String
+  refresh_token      String?  @db.Text
+  access_token       String?  @db.Text
+  expires_at         Int?
+  token_type         String?
+  scope              String?
+  id_token           String?  @db.Text
+  session_state      String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}

@@ -1,0 +1,10 @@
+import { ratingAttributes, type AttributeScores } from "@/lib/rating";
+
+export function RatingSummary({ scores, count, ovr }: { scores: AttributeScores; count: number; ovr: number }) {
+  return <section className="glass space-y-5 p-6" aria-label="Topluluk değerlendirmesi">
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="eyebrow">COMMUNITY RATINGS</p><h2 className="mt-2 text-lg font-semibold">Futbol özellikleri</h2></div><p className="text-xs text-zinc-400">{count} değerlendirme · <span className="font-mono text-emerald-300">{ovr.toFixed(1)} OVR</span></p></div>
+    {count === 0 && <p className="text-sm text-zinc-400">Henüz global değerlendirme yok. OVR varsa eski sistemden taşınan değerdir; ilk değerlendirmeyle topluluk ortalaması kullanılacak.</p>}
+    <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">{ratingAttributes.map(attr => <div key={attr.key}><div className="mb-2 flex items-center justify-between"><span className="text-sm text-zinc-300">{attr.label} <span className="ml-1 text-[10px] text-zinc-500">{attr.code}</span></span><span className="font-mono text-emerald-300">{count ? scores[attr.key].toFixed(1) : "—"}</span></div><div role="meter" aria-label={`${attr.label} ortalaması`} aria-valuemin={0} aria-valuemax={99} aria-valuenow={scores[attr.key]} aria-valuetext={count ? scores[attr.key].toFixed(1) : "Henüz değerlendirilmedi"} className="h-2 overflow-hidden rounded-full bg-zinc-800"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${scores[attr.key] / 99 * 100}%` }} /></div></div>)}</div>
+    <p className="text-xs leading-5 text-zinc-500">Her kullanıcı eşit ağırlıktadır. Her özellik için oyların ortalaması alınır; genel OVR altı özellik ortalamasının aritmetik ortalamasıdır. Kart rozeti en yakın tam sayıya yuvarlanır.</p>
+  </section>;
+}
