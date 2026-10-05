@@ -10,10 +10,10 @@ import { createAuthAdapter } from "../lib/auth-adapter.ts";
 import { createGlobalMatch, deleteGlobalMatch, reportGlobalMatch } from "../lib/match-service.ts";
 import { ratePlayer, castPeerVote } from "../lib/rating-service.ts";
 import { aggregateCrewStandings } from "../lib/crew-standings.ts";
-import { generateInviteCode } from "../lib/validation.ts";
+import { generateInviteCode, normalizeInviteCode } from "../lib/validation.ts";
 import { CREW_MEMBER_LIMIT } from "../lib/football.ts";
 import {
-  acceptInvitation, inviteUserToCrew, joinCrewByInviteCode, rejectInvitation, searchInvitableUsers,
+  acceptInvitation, getCrewByInviteCode, inviteUserToCrew, joinCrewByInviteCode, rejectInvitation, searchInvitableUsers,
 } from "../lib/invitation-service.ts";
 
 test("baseline upgrade, Google adapter, global profiles and match constraints", {
@@ -61,12 +61,30 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
 
     // Peer voting table and the crew-scoped match index arrive on top of that.
     cpSync("prisma/migrations/20261013000000_crew_rating_votes_and_match_scoping", path.join(migrations, "20261013000000_crew_rating_votes_and_match_scoping"), { recursive: true });
-    // Crews that predate this migration must come out of it with a usable code.
+    // Crews that predate this migration must come out of it with a *redeemable* code.
+    // Asserting the join against normalizeInviteCode is the point: an earlier version
+    // of this test checked the backfill against /^[0-9A-F]{8}$/, which passed while
+    // every hex code containing 0, 1, 2, 5, 8 or B was rejected by the invite route.
     await db.$executeRaw`INSERT INTO "Crew" (id, name, "ownerId") VALUES ('pre-invite', 'Eski Ekip', 'legacy')`;
     cpSync("prisma/migrations/20261014000000_crew_invitations_and_invite_links", path.join(migrations, "20261014000000_crew_invitations_and_invite_links"), { recursive: true });
     migrate();
     const backfilled = await db.crew.findUniqueOrThrow({ where: { id: "pre-invite" } });
-    assert.match(backfilled.inviteCode, /^[0-9A-F]{8}$/, "a pre-existing crew must be backfilled with a code");
+    assert.equal(normalizeInviteCode(backfilled.inviteCode), backfilled.inviteCode, "a backfilled code must be one the invite route accepts");
+    assert.equal((await getCrewByInviteCode(db, backfilled.inviteCode))?.id, "pre-invite", "a backfilled link must resolve to its own crew");
+
+    // The repair migration rewrites legacy hex codes, and the alphabet then becomes a
+    // database invariant so no future write can produce an unredeemable link again.
+    await db.$executeRaw`UPDATE "Crew" SET "inviteCode" = 'BCCB52FF' WHERE id = 'pre-invite'`;
+    cpSync("prisma/migrations/20261015000000_repair_legacy_invite_codes", path.join(migrations, "20261015000000_repair_legacy_invite_codes"), { recursive: true });
+    migrate();
+    const repaired = await db.crew.findUniqueOrThrow({ where: { id: "pre-invite" } });
+    assert.notEqual(repaired.inviteCode, "BCCB52FF", "a hex code outside the alphabet must be replaced");
+    assert.equal(normalizeInviteCode(repaired.inviteCode), repaired.inviteCode, "the repaired code must be redeemable");
+    await assert.rejects(
+      db.$executeRawUnsafe(`UPDATE "Crew" SET "inviteCode" = 'ABCDEFG0' WHERE id = 'pre-invite'`),
+      /Crew_inviteCode_alphabet_check|violates check constraint/,
+      "the database must reject a code outside the invite alphabet",
+    );
 
     // Match reporting writes per-season lines, so the suite needs a live season.
     await db.season.create({ data: { name: "Test Season", startDate: new Date("2026-01-01"), endDate: new Date("2026-12-31"), isActive: true } });

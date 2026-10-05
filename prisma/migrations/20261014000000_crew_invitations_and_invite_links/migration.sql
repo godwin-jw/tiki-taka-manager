@@ -32,12 +32,47 @@ ALTER TABLE "CrewInvitation" ADD CONSTRAINT "CrewInvitation_crewId_fkey" FOREIGN
 ALTER TABLE "CrewInvitation" ADD CONSTRAINT "CrewInvitation_senderId_fkey" FOREIGN KEY ("senderId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "CrewInvitation" ADD CONSTRAINT "CrewInvitation_receiverId_fkey" FOREIGN KEY ("receiverId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- Backfill a code for every crew that predates the feature. MD5 of the crew id
--- gives a stable, collision-free 8-character code from data already in the row,
--- so re-running this migration cannot hand two crews the same link.
-UPDATE "Crew"
-SET "inviteCode" = UPPER(SUBSTRING(MD5("id"), 1, 8))
-WHERE "inviteCode" IS NULL;
+-- Backfill a code for every crew that predates the feature.
+--
+-- The code must be drawn from the same 25-character alphabet generateInviteCode()
+-- uses in the application, otherwise normalizeInviteCode rejects it and the link is
+-- dead on arrival. An earlier version of this migration used UPPER(MD5(id)), whose
+-- hex output contains 0, 1, 2, 5, 8 and B -- all outside the invite alphabet. That
+-- produced links for existing crews that could never be redeemed; the repair lives
+-- in 20261015000000_repair_legacy_invite_codes.
+--
+-- Deriving each character from a byte of the digest keeps the result stable across
+-- re-runs, and the retry on a unique violation means a digest collision cannot
+-- hand two crews the same link.
+DO $backfill$
+DECLARE
+  invite_alphabet CONSTANT text := '34679ACDEFGHJKMNPQRTUVWXY';
+  crew_row record;
+  candidate text;
+  salt integer := 0;
+BEGIN
+  FOR crew_row IN SELECT "id" FROM "Crew" WHERE "inviteCode" IS NULL LOOP
+    LOOP
+      candidate := (
+        SELECT string_agg(
+                 substr(invite_alphabet, (get_byte(decode(md5(crew_row."id" || salt::text), 'hex'), position) % length(invite_alphabet)) + 1, 1),
+                 '' ORDER BY position)
+          FROM generate_series(0, 7) AS position
+      );
+      BEGIN
+        UPDATE "Crew" SET "inviteCode" = candidate WHERE "id" = crew_row."id";
+        EXIT;
+      EXCEPTION WHEN unique_violation THEN
+        salt := salt + 1;
+        IF salt > 200 THEN
+          RAISE EXCEPTION 'Could not mint a unique invite code for crew %', crew_row."id";
+        END IF;
+      END;
+    END LOOP;
+    salt := 0;
+  END LOOP;
+END
+$backfill$;
 
 -- A NULL code would break the /davet/[code] lookup, so make it impossible going
 -- forward. createCrew always supplies one before the row is written.
