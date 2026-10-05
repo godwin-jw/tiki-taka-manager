@@ -1,10 +1,11 @@
-﻿import "server-only";
+import "server-only";
 
 import { prisma } from "@/lib/prisma";
-import { getCrewSeasonLeaders } from "@/lib/season-data";
+import { getCrewSeasonLeaders } from "@/lib/crew-leaders";
 import { CREW_MEMBER_LIMIT, canManageCrew, type CrewRoleName } from "@/lib/football";
 import { generateInviteCode } from "@/lib/validation";
 import { ensureInviteCode } from "@/lib/invitation-service";
+import { DEFAULT_CREW_OVR, getCrewOvr } from "@/lib/crew-ovr";
 
 export class CrewError extends Error {}
 
@@ -107,7 +108,7 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
   // PlayerProfile are platform-wide (they include other crews and global matches),
   // so they must NOT be used here: that would leak outside scorers into this crew.
   const activeSeason = await prisma.season.findFirst({ where: { isActive: true }, select: { id: true } });
-  const standings = activeSeason ? await getCrewSeasonLeaders(crewId, activeSeason.id) : null;
+  const standings = activeSeason ? await getCrewSeasonLeaders(prisma, crewId, activeSeason.id) : null;
   const statByUser = new Map((standings?.rows ?? []).map(row => [row.userId, row]));
   // The viewer's own vote per member, so the dialog can reopen on the stored value.
   const viewerVotes = isMember
@@ -116,10 +117,14 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
         select: { targetUserId: true, ovrRating: true },
       })
     : [];
+  // Contextual OVR for the roster: this crew's verdict only, so a player shared
+  // with a stronger side is not shown the other crew's number here.
+  const crewOvr = await getCrewOvr(prisma, crewId, crew.members.map(m => m.user.id));
   const voteByUser = new Map(viewerVotes.map(vote => [vote.targetUserId, vote.ovrRating]));
 
   const roster = crew.members.map((member) => {
     const scoped = statByUser.get(member.user.id);
+    const contextual = crewOvr.get(member.user.id);
     return {
       memberId: member.id,
       role: member.role as CrewRoleName,
@@ -127,7 +132,11 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
       name: member.user.name ?? "Oyuncu",
       image: member.user.image,
       position: member.user.playerProfile?.position ?? ("MID" as const),
-      ovrRating: member.user.playerProfile?.ovrRating ?? 0,
+      // Unrated in this crew: neutral seed plus an explicit flag, never another
+      // crew's rating and never a misleading 0.
+      ovrRating: contextual?.ovrRating ?? DEFAULT_CREW_OVR,
+      isUnrated: contextual?.isUnrated ?? true,
+      voteCount: contextual?.voteCount ?? 0,
       // Career numbers are deliberately crew-scoped when a season exists.
       goals: scoped?.goals ?? 0,
       assists: scoped?.assists ?? 0,
@@ -239,3 +248,8 @@ export async function leaveCrew(userId: string, crewId: string) {
   if (membership.role === "OWNER") throw new CrewError("Ekip sahibi ekibten ayrılamaz.");
   await prisma.crewMember.delete({ where: { id: membership.id } });
 }
+
+// Re-exported so callers (and the action layer) keep a single import site for the
+// crew domain; the implementation lives in its own module so the test suite can
+// exercise it with an injected Prisma client.
+export { kickCrewMember } from "@/lib/crew-kick";

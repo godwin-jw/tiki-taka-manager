@@ -8,17 +8,24 @@ type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction"
 /**
  * Publishes a player's OVR from their crew votes and returns it.
  *
- * Shared by the vote service and the read paths so the profile, the player card
- * and the crew leaderboard can never disagree about a published OVR.
+ * The average is taken from the votes of ONE crew: a player shared by several
+ * crews is rated independently in each, and only this crew's opinion is written
+ * back to the profile. Without the crew filter, the last crew to vote would
+ * silently overwrite the others' verdicts on a single global column.
+ *
+ * PlayerProfile.ovrRating therefore becomes a "no crew has rated them yet" seed
+ * rather than the published value. Every crew-scoped read path goes through
+ * getCrewOvr instead, so the profile, the roster, the match builder and the
+ * leaderboards cannot disagree about a crew's OVR.
  */
-export async function publishPeerOvr(tx: Tx, targetUserId: string) {
+export async function publishPeerOvr(tx: Tx, targetUserId: string, crewId: string) {
   const votes = await tx.playerRatingVote.findMany({
-    where: { targetUserId },
+    where: { targetUserId, crewId },
     select: { voterId: true, ovrRating: true, updatedAt: true },
   });
   const average = averagePeerVotes(votes);
   const target = await tx.user.findUnique({ where: { id: targetUserId }, select: { playerProfile: { select: { id: true } } } });
-  // No votes yet: keep whatever OVR the profile already carries rather than
+  // No votes in this crew yet: leave the profile's seed OVR alone rather than
   // resetting a real rating to zero.
   if (average === null || !target?.playerProfile) return null;
   const ovrRating = clampOvr(average);
@@ -65,7 +72,8 @@ export async function castPeerVote(db: PrismaClient, voterId: string, crewId: un
       update: { ovrRating },
     });
 
-    const published = await publishPeerOvr(tx, target);
+    // Scoped to this crew so one crew's verdict never overwrites another's.
+    const published = await publishPeerOvr(tx, target, crew);
     return { ovrRating: published ?? ovrRating };
   }, { isolationLevel: "ReadCommitted", maxWait: 10_000, timeout: 20_000 });
 }

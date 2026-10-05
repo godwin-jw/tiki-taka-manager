@@ -5,6 +5,12 @@ export type FormResult = "W" | "D" | "L";
 export type RosterPlayer = {
   id: string; userId: string; name: string; image: string | null;
   position: Position; ovrRating: number; form: FormResult[];
+  /**
+   * True when this crew has not rated the player yet, so `ovrRating` is the
+   * neutral seed rather than an actual verdict. Optional because a global
+   * roster has no crew to be unrated within.
+   */
+  isUnrated?: boolean;
 };
 export type DraftPlayer = RosterPlayer & { team: Team; position: Position };
 /**

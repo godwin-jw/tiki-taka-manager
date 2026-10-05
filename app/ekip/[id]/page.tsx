@@ -6,7 +6,7 @@ import { requireUser } from "@/lib/auth";
 import { getCrewDetail } from "@/lib/crew-service";
 import { prisma } from "@/lib/prisma";
 import { listIncomingInvitations } from "@/lib/invitation-service";
-import { BackToCrewsLink, CancelRequestButton, CrewInviteLink, CrewRequestsPanel, IncomingInvitationsPanel, InvitePlayerDialog, JoinCrewForm, JoinSuccessToast, LeaveCrewButton, PeerVoteButton } from "@/components/crew-forms";
+import { BackToCrewsLink, CancelRequestButton, CrewInviteLink, CrewRequestsPanel, IncomingInvitationsPanel, InvitePlayerDialog, JoinCrewForm, JoinSuccessToast, KickMemberButton, LeaveCrewButton, PeerVoteButton } from "@/components/crew-forms";
 import { PlayerAvatar } from "@/components/player-avatar";
 import { OvrBadge } from "@/components/ovr-badge";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +19,7 @@ const roleLabels = { OWNER: "Kurucu", CAPTAIN: "Kaptan", MEMBER: "Üye" } as con
 function Leaderboard({ title, icon: Icon, rows, metric }: {
   title: string;
   icon: typeof Trophy;
-  rows: Array<{ userId: string; name: string; image: string | null; position: string; ovrRating: number; goals: number; assists: number; motmCount: number }>;
+  rows: Array<{ userId: string; name: string; image: string | null; position: string; ovrRating: number; isUnrated?: boolean; goals: number; assists: number; motmCount: number }>;
   metric: "ovrRating" | "goals" | "assists" | "motmCount";
 }) {
   // Sorted by the requested metric, then OVR, then name for a stable order.
@@ -32,7 +32,9 @@ function Leaderboard({ title, icon: Icon, rows, metric }: {
           <span className="w-5 shrink-0 font-mono text-xs text-zinc-500">{index + 1}</span>
           <PlayerAvatar name={row.name} image={row.image} className="size-8" />
           <span className="min-w-0 flex-1 truncate text-sm">{row.name}</span>
-          <span className="shrink-0 font-mono text-sm font-bold text-emerald-300">{Math.round(row[metric])}</span>
+          {/* An unrated player has only a seed value in this crew, so the OVR card
+              says so instead of presenting 75 as a verdict. */}
+          <span className="shrink-0 font-mono text-sm font-bold text-emerald-300">{metric === "ovrRating" && row.isUnrated ? "—" : Math.round(row[metric])}</span>
         </Link>
       </li>
     ))}</ol>
@@ -98,7 +100,7 @@ export default async function CrewPage({ params, searchParams }: { params: Promi
                   <p className="truncate text-sm font-semibold">{member.name}</p>
                   <p className="text-xs text-zinc-500">{positionLabels[member.position]} · {roleLabels[member.role]}</p>
                 </div>
-                <OvrBadge value={member.ovrRating} />
+                <OvrBadge value={member.ovrRating} isUnrated={member.isUnrated} voteCount={member.voteCount} />
               </Link>
               {/* Self-voting is blocked server-side, so the button is simply not offered. */}
               {member.userId !== user.id && (
@@ -109,6 +111,20 @@ export default async function CrewPage({ params, searchParams }: { params: Promi
                   image={member.image}
                   currentOvr={member.ovrRating}
                   existingVote={member.viewerVote}
+                />
+              )}
+              {/* Mirrors the server rules: managers only, never the owner, never
+                  yourself, and a captain may not remove a fellow captain. */}
+              {crew.isManager && (
+                <KickMemberButton
+                  crewId={crew.id}
+                  targetUserId={member.userId}
+                  name={member.name}
+                  disabled={
+                    member.userId === user.id ||
+                    member.role === "OWNER" ||
+                    (member.role === "CAPTAIN" && !crew.isOwner)
+                  }
                 />
               )}
             </li>

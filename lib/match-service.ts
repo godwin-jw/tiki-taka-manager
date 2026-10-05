@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { optionalCrewId, parseLineup, parseReport, teamName, text, ValidationError } from "./validation.ts";
+import { DEFAULT_CREW_OVR, getCrewOvrByProfile } from "./crew-ovr.ts";
 
 // Not a Server Action: callers supply the authenticated server-side user ID.
 export async function createGlobalMatch(db: PrismaClient, userId: string, input: { requestId: unknown; date: unknown; lineup: unknown; teamAName?: unknown; teamBName?: unknown; crewId?: unknown }) {
@@ -39,7 +40,17 @@ export async function createGlobalMatch(db: PrismaClient, userId: string, input:
     const allowed = new Set(members.flatMap(row => row.user.playerProfile ? [row.user.playerProfile.id] : []));
     if (lineup.some(player => !allowed.has(player.id))) throw new ValidationError("Kadro yalnızca bu ekibin üyelerinden oluşabilir.");
   }
-  const ratings = new Map(profiles.map(p => [p.id, p.ovrRating]));
+  // Contextual OVR: a crew match records the rating THIS crew gives its players.
+  // Reading the global profile column would snapshot another crew's opinion into
+  // this crew's archive, and later rollbacks would subtract the wrong number.
+  const crewOvrByProfile = crewId
+    ? await getCrewOvrByProfile(db, crewId, lineup.map(p => p.id))
+    : null;
+  const ratings = new Map(profiles.map(p => {
+    const crewOvr = crewOvrByProfile?.get(p.id);
+    const value = crewOvr?.ovrRating ?? (crewId ? DEFAULT_CREW_OVR : p.ovrRating);
+    return [p.id, value];
+  }));
   try {
     await db.match.create({ data: {
       id, date, createdById: userId, status: "ONGOING", seasonId: activeSeasonId, crewId, teamAName: nameA, teamBName: nameB,

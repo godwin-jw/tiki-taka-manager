@@ -5,6 +5,8 @@ export type CrewStandingRow = {
   name: string;
   position: string;
   ovrRating: number;
+  /** True when this crew has not rated the player; ovrRating is then a seed value. */
+  isUnrated?: boolean;
   goals: number;
   assists: number;
   matchesPlayed: number;

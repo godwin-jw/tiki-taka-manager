@@ -3,11 +3,13 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
 import {
   CrewError,
   approveCrewRequest,
   cancelCrewRequest,
   createCrew,
+  kickCrewMember,
   leaveCrew,
   rejectCrewRequest,
   requestToJoin,
@@ -76,6 +78,27 @@ export async function reviewCrewRequestAction(_previous: ActionState, form: Form
     if (crewId) revalidatePath(crewPath(crewId));
     revalidatePath("/ekipler");
     return { success: decision === "ACCEPT" ? "Oyuncu ekibe katıldı." : "İstek reddedildi." };
+  } catch (error) {
+    return failure(error);
+  }
+}
+
+/**
+ * Removes a member from a crew.
+ *
+ * The crew id and the target both come from the form, but every rule is decided
+ * by kickCrewMember against the session user, so a hand-crafted request cannot
+ * remove somebody the actor has no authority over.
+ */
+export async function kickCrewMemberAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+  const user = await requireUser();
+  try {
+    const crewId = text(form.get("crewId"), "Ekip", 1, 100);
+    const targetUserId = text(form.get("userId"), "Oyuncu", 1, 100);
+    await kickCrewMember(prisma, user.id, crewId, targetUserId);
+    revalidatePath(crewPath(crewId));
+    revalidatePath("/ekipler");
+    return { success: "Oyuncu ekipten çıkarıldı." };
   } catch (error) {
     return failure(error);
   }

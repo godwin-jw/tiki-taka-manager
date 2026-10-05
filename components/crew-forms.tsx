@@ -2,11 +2,15 @@
 
 import { useActionState, useEffect, useState } from "react";
 import Link from "next/link";
-import { Check, Copy, Crown, Link2, LoaderCircle, LogOut, Send, Shield, ThumbsUp, UserPlus } from "lucide-react";
+import { Check, Copy, Crown, Link2, LoaderCircle, LogOut, Send, Shield, ThumbsUp, Trash2, UserPlus } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { submitPeerVote } from "@/app/actions/rating";
 import { searchUsersToInvite, sendCrewInvitation } from "@/app/actions/invitation";
 import { acceptCrewInvitation, rejectCrewInvitation } from "@/app/actions/invitation";
-import { cancelCrewRequestAction, createCrewAction, leaveCrewAction, requestToJoinAction, reviewCrewRequestAction } from "@/app/actions/crew";
+import { cancelCrewRequestAction, createCrewAction, kickCrewMemberAction, leaveCrewAction, requestToJoinAction, reviewCrewRequestAction } from "@/app/actions/crew";
 import {
   Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle, DialogTrigger,
@@ -313,6 +317,63 @@ export function JoinSuccessToast({ joined, crewName }: { joined: boolean; crewNa
     <Check className="size-4 shrink-0" />
     <strong className="text-emerald-100">{crewName}</strong> ekibine başarıyla katıldın. Hoş geldin!
   </p>;
+}
+
+/**
+ * Captain-only control that removes a member from the crew.
+ *
+ * The button is not rendered for the crew owner, for the acting user, or for
+ * ordinary members, so the UI mirrors the server rules. AlertDialog is used
+ * because the action is destructive and irreversible from the crew's view.
+ */
+export function KickMemberButton({ crewId, targetUserId, name, disabled }: {
+  crewId: string;
+  targetUserId: string;
+  name: string;
+  /** Set for roles the server would refuse, to explain why instead of failing. */
+  disabled?: boolean;
+}) {
+  const [state, action, pending] = useActionState(kickCrewMemberAction, {});
+  return <AlertDialog>
+    <AlertDialogTrigger asChild>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        disabled={pending || disabled}
+        title={disabled ? "Bu üyeyi çıkaramazsın" : `${name} kişisini ekipten çıkar`}
+        aria-label={`${name} kişisini ekipten çıkar`}
+        className="shrink-0 text-zinc-500 hover:text-rose-300"
+      >
+        {pending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}
+      </Button>
+    </AlertDialogTrigger>
+    <AlertDialogContent>
+      <AlertDialogHeader>
+        <AlertDialogTitle>{name} ekipten çıkarılsın mı?</AlertDialogTitle>
+        <AlertDialogDescription>
+          {name} bu ekibin üyeliğini kaybedecek ve artık bu ekibin maç kadrolarına
+          seçilemeyecek. Geçmiş maçlardaki istatistikleri ve oyuncu hesabı silinmez.
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      {state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}
+      <AlertDialogFooter>
+        <AlertDialogCancel>Vazgeç</AlertDialogCancel>
+        <AlertDialogAction asChild>
+          {/* form points at the hidden form below so crewId/userId travel with the
+              submit. A formAction dispatch would not carry those fields. */}
+          <Button type="submit" form={`kick-form-${crewId}-${targetUserId}`} variant="destructive" disabled={pending}>
+            {pending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Çıkar
+          </Button>
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+    {/* Carries the target for the submit above; kept out of the trigger's tree. */}
+    <form id={`kick-form-${crewId}-${targetUserId}`} action={action} className="hidden">
+      <input type="hidden" name="crewId" value={crewId} />
+      <input type="hidden" name="userId" value={targetUserId} />
+    </form>
+  </AlertDialog>;
 }
 
 export function CreateCrewForm() {

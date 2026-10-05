@@ -107,7 +107,7 @@ export function MobilePlayerPicker() {
                         onClick={() => toggle(player.id)}
                         disabled={blocked}
                         aria-pressed={selected}
-                        aria-label={`${player.name}, ${positionLabels[player.position]}, ${Math.round(player.ovrRating)} OVR, ${selected ? "seçimi kaldır" : "kadroya ekle"}`}
+                        aria-label={`${player.name}, ${positionLabels[player.position]}, ${player.isUnrated ? "bu ekipte puan yok" : `${Math.round(player.ovrRating)} OVR`}, ${selected ? "seçimi kaldır" : "kadroya ekle"}`}
                         className={cn(
                           "flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-colors",
                           selected ? "border-emerald-400/40 bg-emerald-400/10" : "border-white/10 bg-white/[0.03]",
@@ -119,7 +119,7 @@ export function MobilePlayerPicker() {
                           <span className="block truncate text-sm font-medium">{player.name}</span>
                           <span className="block text-[11px] text-zinc-500">{player.position} · {positionLabels[player.position]}</span>
                         </span>
-                        <OvrBadge value={player.ovrRating} />
+                        <OvrBadge value={player.ovrRating} isUnrated={player.isUnrated} />
                         <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-full border", selected ? "border-emerald-400 bg-emerald-400 text-zinc-950" : "border-white/15")}>
                           {selected ? <Check className="size-4" /> : <X className="size-3.5 text-transparent" />}
                         </span>

@@ -10,6 +10,9 @@ import { createAuthAdapter } from "../lib/auth-adapter.ts";
 import { createGlobalMatch, deleteGlobalMatch, reportGlobalMatch } from "../lib/match-service.ts";
 import { ratePlayer, castPeerVote } from "../lib/rating-service.ts";
 import { aggregateCrewStandings } from "../lib/crew-standings.ts";
+import { getCrewOvr, getCrewOvrByProfile } from "../lib/crew-ovr.ts";
+import { getCrewSeasonLeaders } from "../lib/crew-leaders.ts";
+import { kickCrewMember } from "../lib/crew-kick.ts";
 import { generateInviteCode, normalizeInviteCode } from "../lib/validation.ts";
 import { CREW_MEMBER_LIMIT } from "../lib/football.ts";
 import {
@@ -189,9 +192,9 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await Promise.all([ratePlayer(db, extras[0].id, profile.id, scores(30)), ratePlayer(db, extras[0].id, profile.id, scores(90))]);
     const ratings = await db.playerRating.findMany({ where: { playerProfileId: profile.id } });
     assert.equal(ratings.length, 3);
-    const ratedProfile = await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } });
-    assert.ok(Math.abs(ratedProfile.ovrRating - ratings.reduce((sum, row) => sum + row.pace, 0) / 3) < 1e-10);
-    assert.equal(ratedProfile.goals, 1); assert.equal(ratedProfile.matchesPlayed, 1);
+    const dualProfile = await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } });
+    assert.ok(Math.abs(dualProfile.ovrRating - ratings.reduce((sum, row) => sum + row.pace, 0) / 3) < 1e-10);
+    assert.equal(dualProfile.goals, 1); assert.equal(dualProfile.matchesPlayed, 1);
     assert.equal((await db.matchPlayer.findUniqueOrThrow({ where: { matchId_playerProfileId: { matchId: globalId, playerProfileId: profile.id } } })).ovrAtMatch, 0);
     await assert.rejects(db.playerRating.create({ data: { raterId: extras[0].id, playerProfileId: profile.id, ...scores(50) } }), { code: "P2002" });
     await assert.rejects(db.playerRating.update({ where: { id: ratings[0].id }, data: { pace: 100 } }));
@@ -419,9 +422,140 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     assert.equal(await db.crewMember.count({ where: { crewId: freshCrew.id, userId: rejectTarget.id } }), 0);
     await assert.rejects(rejectInvitation(db, legacy.id, toReject.id), /ait değil/);
 
+    // ---- GÖREV 1: kicking a member ---------------------------------------
+    const kickCrew = await db.crew.create({ data: { name: "Kick Crew", ownerId: user.id, inviteCode: generateInviteCode() } });
+    const kickOwner = user;
+    const kickCaptain = await db.user.create({ data: { email: `kc-${randomUUID()}@test.dev`, name: "Kaptan" } });
+    const kickMate = await db.user.create({ data: { email: `km-${randomUUID()}@test.dev`, name: "Ekip Arkadasi" } });
+    const kickTarget = await db.user.create({ data: { email: `kt-${randomUUID()}@test.dev`, name: "Cikarilacak" } });
+    const statsTarget = await db.playerProfile.create({ data: { userId: kickTarget.id, position: "MID", ovrRating: 80, goals: 12, assists: 4, matchesPlayed: 9, motmCount: 2 } });
+    await db.playerSeasonStat.create({ data: { seasonId: (await db.season.findFirstOrThrow()).id, playerProfileId: statsTarget.id, goals: 12, assists: 4, matchesPlayed: 9, motmCount: 2, ovrRating: 80 } });
+    for (const [uid, role] of [[kickOwner.id, "OWNER"], [kickCaptain.id, "CAPTAIN"], [kickMate.id, "MEMBER"], [kickTarget.id, "MEMBER"]]) {
+      await db.crewMember.create({ data: { crewId: kickCrew.id, userId: uid, role } });
+    }
 
+    // A plain member cannot kick anybody.
+    await assert.rejects(kickCrewMember(db, kickMate.id, kickCrew.id, kickTarget.id), /kaptan/);
+    // Nobody may kick themselves, and the OWNER can never be removed.
+    await assert.rejects(kickCrewMember(db, kickOwner.id, kickCrew.id, kickOwner.id), /Kendini/);
+    await assert.rejects(kickCrewMember(db, kickCaptain.id, kickCrew.id, kickOwner.id), /sahibi/);
+    // A captain may not remove a fellow captain; the owner may. A second captain
+    // is needed so the actor and the target are genuinely different people.
+    const rivalCaptain = await db.user.create({ data: { email: `rc-${randomUUID()}@test.dev`, name: "Diger Kaptan" } });
+    await db.crewMember.create({ data: { crewId: kickCrew.id, userId: rivalCaptain.id, role: "CAPTAIN" } });
+    await assert.rejects(kickCrewMember(db, kickCaptain.id, kickCrew.id, rivalCaptain.id), /kurucu/);
+    // The owner, however, may remove a captain.
+    await kickCrewMember(db, kickOwner.id, kickCrew.id, rivalCaptain.id);
+    assert.equal(await db.crewMember.count({ where: { crewId: kickCrew.id, userId: rivalCaptain.id } }), 0);
 
-    console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages, historical snapshots, crew peer voting rules, stat rollback on delete, crew data isolation, invitations and invite links.");
+    // The captain kicks an ordinary member: membership goes, history stays.
+    await kickCrewMember(db, kickCaptain.id, kickCrew.id, kickTarget.id);
+    assert.equal(await db.crewMember.count({ where: { crewId: kickCrew.id, userId: kickTarget.id } }), 0);
+    assert.notEqual(await db.user.findUnique({ where: { id: kickTarget.id } }), null, "the account must survive a kick");
+    const profileAfter = await db.playerProfile.findUniqueOrThrow({ where: { id: statsTarget.id } });
+    assert.equal(profileAfter.goals, 12, "career goals must not be rolled back by a kick");
+    assert.equal(profileAfter.matchesPlayed, 9);
+    assert.equal(profileAfter.motmCount, 2);
+    const seasonRow = await db.playerSeasonStat.findFirstOrThrow({ where: { playerProfileId: statsTarget.id } });
+    assert.equal(seasonRow.goals, 12, "season stats must not be rolled back by a kick");
+    // Kicking someone who already left is a clean error, not a crash.
+    await assert.rejects(kickCrewMember(db, kickCaptain.id, kickCrew.id, kickTarget.id), /üyesi değil/);
+    // And a kicked member can no longer be voted for in that crew.
+    assert.equal(await db.crewMember.count({ where: { crewId: kickCrew.id } }), 3);
+    // ---- GÖREV 3: contextual OVR and crew-scoped statistics ---------------
+    // The same player in two crews must get a different rating in each, and one
+    // crew's votes must never surface in the other.
+    const dualCrew = await db.crew.create({ data: { name: "Crew A", ownerId: user.id, inviteCode: generateInviteCode() } });
+    const secondCrew = await db.crew.create({ data: { name: "Crew B", ownerId: legacy.id, inviteCode: generateInviteCode() } });
+    const rated = await db.user.create({ data: { email: `dual-${randomUUID()}@test.dev`, name: "Cift Ekipli" } });
+    const ctxProfile = await db.playerProfile.create({ data: { userId: rated.id, position: "MID", ovrRating: 10 } });
+    // Crew A: the owner and one extra voter, both rating `rated` at 90.
+    const aVoter = await db.user.create({ data: { email: `av-${randomUUID()}@test.dev` } });
+    const ctxAVoterProfile = await db.playerProfile.create({ data: { userId: aVoter.id, position: "DEF" } });
+    for (const [uid, role] of [[user.id, "OWNER"], [aVoter.id, "MEMBER"], [rated.id, "MEMBER"]]) {
+      await db.crewMember.create({ data: { crewId: dualCrew.id, userId: uid, role } });
+    }
+    // The two squad players appear in a crew A match, so they must be members.
+    for (const p of extraProfiles) {
+      await db.crewMember.create({ data: { crewId: dualCrew.id, userId: p.userId, role: "MEMBER" } });
+    }
+    // Crew B: the legacy captain rates the same player at 30.
+    const bVoter = await db.user.create({ data: { email: `bv-${randomUUID()}@test.dev` } });
+    const ctxBVoterProfile = await db.playerProfile.create({ data: { userId: bVoter.id, position: "DEF" } });
+    for (const [uid, role] of [[legacy.id, "OWNER"], [bVoter.id, "MEMBER"], [rated.id, "MEMBER"]]) {
+      await db.crewMember.create({ data: { crewId: secondCrew.id, userId: uid, role } });
+    }
+    // extraProfiles[1] plays in the crew B match.
+    await db.crewMember.create({ data: { crewId: secondCrew.id, userId: extraProfiles[1].userId, role: "MEMBER" } });
+    await castPeerVote(db, user.id, dualCrew.id, rated.id, 90);
+    await castPeerVote(db, aVoter.id, dualCrew.id, rated.id, 90);
+    await castPeerVote(db, legacy.id, secondCrew.id, rated.id, 30);
+
+    const aView = await getCrewOvr(db, dualCrew.id, [rated.id]);
+    const bView = await getCrewOvr(db, secondCrew.id, [rated.id]);
+    assert.equal(aView.get(rated.id).ovrRating, 90, "crew A must see its own 90 average");
+    assert.equal(aView.get(rated.id).voteCount, 2);
+    assert.equal(aView.get(rated.id).isUnrated, false);
+    assert.equal(bView.get(rated.id).ovrRating, 30, "crew B must see its own 30 average, not crew A's 90");
+    assert.equal(bView.get(rated.id).voteCount, 1);
+    // A player nobody has rated is reported as unrated rather than as a 0.
+    const neverRated = await db.user.create({ data: { email: `nr-${randomUUID()}@test.dev` } });
+    await db.crewMember.create({ data: { crewId: dualCrew.id, userId: neverRated.id, role: "MEMBER" } });
+    const unratedView = await getCrewOvr(db, dualCrew.id, [neverRated.id]);
+    assert.equal(unratedView.get(neverRated.id).ovrRating, null, "an unrated player has no crew OVR");
+    assert.equal(unratedView.get(neverRated.id).isUnrated, true);
+    assert.equal((await getCrewOvr(db, secondCrew.id, [neverRated.id])).get(neverRated.id).ovrRating, null);
+    // The profile-space view resolves the same per-crew values.
+    const byProfileA = await getCrewOvrByProfile(db, dualCrew.id, [ctxProfile.id]);
+    const byProfileB = await getCrewOvrByProfile(db, secondCrew.id, [ctxProfile.id]);
+    assert.equal(byProfileA.get(ctxProfile.id).ovrRating, 90);
+    assert.equal(byProfileB.get(ctxProfile.id).ovrRating, 30);
+
+    // A crew match snapshots the rating THIS crew gives its players, so the
+    // archive never carries another crew's opinion.
+    const ctxMatchA = randomUUID();
+    await createGlobalMatch(db, user.id, { requestId: ctxMatchA, date: new Date().toISOString(), crewId: dualCrew.id, lineup: [
+      { id: profile.id, team: "A", position: "MID" }, { id: ctxProfile.id, team: "A", position: "MID" },
+      { id: ctxAVoterProfile.id, team: "B", position: "DEF" }, { id: extraProfiles[0].id, team: "B", position: "DEF" },
+    ] });
+    const recordedOvr = await db.matchPlayer.findUniqueOrThrow({ where: { matchId_playerProfileId: { matchId: ctxMatchA, playerProfileId: ctxProfile.id } } });
+    assert.equal(recordedOvr.ovrAtMatch, 90, "a crew match must snapshot the crew's OVR");
+
+    // Leaderboards only count their own crew's matches. `rated` scores in crew B
+    // while playing for crew B, so crew A must show none of it.
+    const ctxSeason = await db.season.findFirstOrThrow();
+    const ctxMatchB = randomUUID();
+    const ctxLineupB = [
+      { id: legacy.playerProfile.id, team: "A", position: "MID" }, { id: ctxProfile.id, team: "A", position: "MID" },
+      { id: ctxBVoterProfile.id, team: "B", position: "DEF" }, { id: extraProfiles[1].id, team: "B", position: "DEF" },
+    ];
+    await createGlobalMatch(db, legacy.id, { requestId: ctxMatchB, date: new Date().toISOString(), crewId: secondCrew.id, lineup: ctxLineupB });
+    await reportGlobalMatch(db, legacy.id, ctxMatchB, {
+      scoreA: 3, scoreB: 0, motmId: ctxProfile.id,
+      players: ctxLineupB.map((p, i) => ({ id: p.id, goals: i === 1 ? 3 : 0, assists: i === 1 ? 1 : 0 })),
+    });
+    const aRow = (await getCrewSeasonLeaders(db, dualCrew.id, ctxSeason.id)).rows.find(r => r.userId === rated.id);
+    assert.equal(aRow.goals, 0, "crew A must not show goals scored in crew B");
+    assert.equal(aRow.assists, 0);
+    assert.equal(aRow.motmCount, 0, "crew A must not show an MOTM earned in crew B");
+    assert.equal(aRow.ovrRating, 90, "the crew A leaderboard shows the crew A rating");
+    const bLeaders = await getCrewSeasonLeaders(db, secondCrew.id, ctxSeason.id);
+    const bRow = bLeaders.rows.find(r => r.userId === rated.id);
+    assert.equal(bRow.goals, 3, "crew B must show its own goal");
+    assert.equal(bRow.motmCount, 1);
+    assert.equal(bRow.ovrRating, 30, "the crew B leaderboard shows the crew B rating");
+    // A player who never played for a crew is absent from its table entirely.
+    assert.equal(bLeaders.rows.find(r => r.userId === user.id), undefined, "a non-member must not appear in a crew leaderboard");
+
+    // GÖREV 2: a crew match may only field that crew's members. `user` is in crew
+    // A, so putting them in a crew B lineup must be refused.
+    await assert.rejects(createGlobalMatch(db, legacy.id, { requestId: randomUUID(), date: new Date().toISOString(), crewId: secondCrew.id, lineup: [
+      { id: profile.id, team: "A", position: "MID" }, { id: ctxProfile.id, team: "A", position: "MID" },
+      { id: ctxBVoterProfile.id, team: "B", position: "DEF" }, { id: extraProfiles[1].id, team: "B", position: "DEF" },
+    ] }), /üyelerinden/);
+
+    console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages, historical snapshots, crew peer voting rules, stat rollback on delete, crew data isolation, invitations, invite links, member removal with preserved history, contextual OVR, crew-scoped leaderboards and crew-only lineups.");
+
   } finally {
     if (createdSchema) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await db.$disconnect();
