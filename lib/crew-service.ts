@@ -1,8 +1,10 @@
-import "server-only";
+﻿import "server-only";
 
 import { prisma } from "@/lib/prisma";
 import { getCrewSeasonLeaders } from "@/lib/season-data";
 import { CREW_MEMBER_LIMIT, canManageCrew, type CrewRoleName } from "@/lib/football";
+import { generateInviteCode } from "@/lib/validation";
+import { ensureInviteCode } from "@/lib/invitation-service";
 
 export class CrewError extends Error {}
 
@@ -55,6 +57,7 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
       name: true,
       logo: true,
       createdAt: true,
+      inviteCode: true,
       owner: { select: { id: true, name: true, image: true } },
       members: {
         orderBy: [{ joinedAt: "asc" }],
@@ -140,6 +143,9 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
     name: crew.name,
     logo: crew.logo,
     createdAt: crew.createdAt,
+    // A crew created before the invite feature is repaired on read, so the share
+    // link never renders as empty.
+    inviteCode: await ensureInviteCode(prisma, crew.id),
     ownerName: crew.owner.name ?? "Bilinmiyor",
     ownerId: crew.owner.id,
     memberCount: crew._count.members,
@@ -163,8 +169,9 @@ export async function createCrew(userId: string, name: string) {
     const duplicate = await tx.crew.findFirst({ where: { name: { equals: name, mode: "insensitive" } }, select: { id: true } });
     if (duplicate) throw new CrewError("Bu isimde bir ekip zaten var.");
     // The owner is seeded as an OWNER member so listing and "my crews" queries
-    // never depend on a second code path.
-    return tx.crew.create({ data: { name, ownerId: userId, members: { create: { userId, role: "OWNER" } } }, select: { id: true, name: true } });
+    // never depend on a second code path. The invite code is minted here so a
+    // crew is never created without a shareable link.
+    return tx.crew.create({ data: { name, ownerId: userId, inviteCode: generateInviteCode(), members: { create: { userId, role: "OWNER" } } }, select: { id: true, name: true, inviteCode: true } });
   });
 }
 

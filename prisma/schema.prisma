@@ -70,6 +70,8 @@ model User {
   crewMemberships      CrewMember[]
   sentCrewRequests     CrewRequest[]        @relation("CrewRequestSender")
   reviewedCrewRequests CrewRequest[]        @relation("CrewRequestReviewer")
+  sentInvitations      CrewInvitation[]     @relation("InvitationSender")
+  receivedInvitations  CrewInvitation[]     @relation("InvitationReceiver")
 }
 
 model Group {
@@ -149,6 +151,12 @@ model Crew {
   logo      String?
   createdAt DateTime @default(now())
 
+  // Shareable join link (/davet/<code>). Nullable only so the backfill migration
+  // can attach a code to pre-existing crews; every crew created by the app has
+  // one. It is an 8-character human-readable token, never a cuid, because people
+  // retype and read it out loud.
+  inviteCode String? @unique
+
   // The owner is always a member too; see the seeding logic in the service.
   ownerId String
   owner   User   @relation("CrewOwner", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -157,6 +165,7 @@ model Crew {
   requests CrewRequest[]
   matches  Match[]
   votes    PlayerRatingVote[]
+  invitations CrewInvitation[]
 
   @@index([name])
   @@map("Crew")
@@ -205,6 +214,40 @@ model CrewRequest {
   @@index([crewId, status])
   @@index([userId, status])
   @@map("CrewRequest")
+}
+
+// A direct, crew-to-player invitation sent inside the app.
+//
+// This is the mirror image of CrewRequest: a captain invites a specific player
+// (receiverId), whereas CrewRequest is a player asking to join (userId). Keeping
+// them as separate models means neither can be forged into the other, because the
+// receiver of an invitation can only ever act on it themselves.
+model CrewInvitation {
+  id         String   @id @default(cuid())
+  status     CrewRequestStatus @default(PENDING)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  // Set when the invitation leaves the PENDING state.
+  resolvedAt DateTime?
+
+  crewId String
+  crew   Crew   @relation(fields: [crewId], references: [id], onDelete: Cascade)
+
+  // The captain who sent it; kept for audit and for the "sent" list.
+  senderId String
+  sender   User   @relation("InvitationSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  // The invited player. Only this user may accept or reject the invitation.
+  receiverId String
+  receiver   User   @relation("InvitationReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  // One open invitation per crew and receiver: re-inviting refreshes the row
+  // instead of flooding the inbox with duplicates.
+  @@unique([crewId, receiverId])
+  @@index([receiverId, status])
+  @@index([crewId, status])
+  @@index([senderId])
+  @@map("CrewInvitation")
 }
 
 // A competition period. Exactly one season is expected to be active.

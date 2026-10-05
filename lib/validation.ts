@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 export class ValidationError extends Error {}
 
 export function text(value: unknown, label: string, min = 1, max = 100): string {
@@ -94,6 +96,47 @@ export function parseCrewName(form: FormData) {
   const name = text(form.get("name"), "Ekip adı", 3, 40);
   // Collapse repeated spaces so "A  Takımı" and "A Takımı" are the same crew.
   return { name: name.replace(/\s+/g, " ") };
+}
+
+/**
+ * Alphabet for shareable invite codes.
+ *
+ * Digits and letters that look alike when read aloud or copied by hand
+ * (0/O, 1/I/L, 5/S, 8/B, 2/Z) are left out on purpose: these codes travel through
+ * chat messages, voice notes and screenshots.
+ */
+const INVITE_ALPHABET = "34679ACDEFGHJKMNPQRTUVWXY";
+export const INVITE_CODE_LENGTH = 8;
+
+/**
+ * Generates a fresh random invite code.
+ *
+ * Uses crypto-grade randomness because the code is a bearer token: anyone holding
+ * it can join the crew. Math.random is not acceptable here.
+ */
+export function generateInviteCode(): string {
+  const bytes = randomBytes(INVITE_CODE_LENGTH);
+  let code = "";
+  for (let index = 0; index < INVITE_CODE_LENGTH; index++) {
+    code += INVITE_ALPHABET[bytes[index] % INVITE_ALPHABET.length];
+  }
+  return code;
+}
+
+/**
+ * Normalises a user-supplied invite code for lookup.
+ *
+ * Codes are generated uppercase, but a shared link may have been lowercased by
+ * a chat client, so matching is case-insensitive. Anything that is not 8
+ * characters of the alphabet is rejected before it reaches the database.
+ */
+export function normalizeInviteCode(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim().toUpperCase() : "";
+  if (raw.length !== INVITE_CODE_LENGTH) throw new ValidationError("Davet kodu 8 karakter olmalıdır.");
+  for (const character of raw) {
+    if (!INVITE_ALPHABET.includes(character)) throw new ValidationError("Davet kodu geçersiz.");
+  }
+  return raw;
 }
 
 export function parseCrewRequestMessage(value: unknown) {

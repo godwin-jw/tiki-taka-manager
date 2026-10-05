@@ -1,10 +1,12 @@
-import type { Metadata } from "next";
+﻿import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Crown, Lock, Shield, Swords, Target, Trophy, Users } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { getCrewDetail } from "@/lib/crew-service";
-import { BackToCrewsLink, CancelRequestButton, CrewRequestsPanel, JoinCrewForm, LeaveCrewButton, PeerVoteButton } from "@/components/crew-forms";
+import { prisma } from "@/lib/prisma";
+import { listIncomingInvitations } from "@/lib/invitation-service";
+import { BackToCrewsLink, CancelRequestButton, CrewInviteLink, CrewRequestsPanel, IncomingInvitationsPanel, InvitePlayerDialog, JoinCrewForm, JoinSuccessToast, LeaveCrewButton, PeerVoteButton } from "@/components/crew-forms";
 import { PlayerAvatar } from "@/components/player-avatar";
 import { OvrBadge } from "@/components/ovr-badge";
 import { Badge } from "@/components/ui/badge";
@@ -37,14 +39,26 @@ function Leaderboard({ title, icon: Icon, rows, metric }: {
   </section>;
 }
 
-export default async function CrewPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function CrewPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ katildi?: string }> }) {
   const user = await requireUser();
   const { id } = await params;
-  const crew = await getCrewDetail(id, user.id);
+  const [{ katildi }, crew, invitations] = await Promise.all([
+    searchParams,
+    getCrewDetail(id, user.id),
+    listIncomingInvitations(prisma, user.id),
+  ]);
   if (!crew) notFound();
+  const justJoined = katildi === "1";
 
   return <div className="space-y-6">
     <BackToCrewsLink />
+    <JoinSuccessToast joined={justJoined} crewName={crew.name} />
+    {invitations.length > 0 && <IncomingInvitationsPanel invitations={invitations.map(entry => ({
+      id: entry.id,
+      createdAt: entry.createdAt,
+      crew: { id: entry.crew.id, name: entry.crew.name, logo: entry.crew.logo, memberCount: entry.crew._count.members },
+      sender: { id: entry.sender.id, name: entry.sender.name, image: entry.sender.image },
+    }))} />}
 
     <section className="glass flex flex-wrap items-start justify-between gap-6 p-6 sm:p-8">
       <div className="min-w-0">
@@ -64,7 +78,13 @@ export default async function CrewPage({ params }: { params: Promise<{ id: strin
       </div>
     </section>
 
-    {crew.isManager && <CrewRequestsPanel crewId={crew.id} requests={crew.pendingRequests} />}
+    {crew.isManager && <>
+      <CrewInviteLink inviteCode={crew.inviteCode} crewName={crew.name} />
+      <div className="flex justify-end">
+        <InvitePlayerDialog crewId={crew.id} />
+      </div>
+      <CrewRequestsPanel crewId={crew.id} requests={crew.pendingRequests} />
+    </>}
 
     {crew.isMember ? (
       <>

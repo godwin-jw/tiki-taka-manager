@@ -1,12 +1,27 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { PrismaClient } from "@prisma/client";
 
-if (!process.env.TEST_DATABASE_URL) throw new Error("TEST_DATABASE_URL is required; use a dedicated PostgreSQL database.");
+// No dedicated test database configured: start a throwaway PostgreSQL so the
+// suite can always run. The application's DATABASE_URL is never touched.
+let embedded = null;
+if (!process.env.TEST_DATABASE_URL) {
+  const EmbeddedPostgres = (await import("embedded-postgres")).default;
+  const folder = mkdtempSync(path.join(tmpdir(), "tiki-e2e-"));
+  const password = randomBytes(24).toString("base64url");
+  const embeddedPort = 5437;
+  embedded = new EmbeddedPostgres({ databaseDir: path.join(folder, "data"), user: "postgres", password, port: embeddedPort, persistent: true, initdbFlags: ["--encoding=UTF8", "--locale=C"], postgresFlags: ["-c", "io_method=sync"], onLog: () => {}, onError: () => {} });
+  await embedded.initialise();
+  await embedded.start();
+  process.env.TEST_DATABASE_URL = `postgresql://postgres:${password}@localhost:${embeddedPort}/postgres?schema=public`;
+  process.env.NEXTAUTH_SECRET = randomBytes(32).toString("base64");
+  embedded.folder = folder;
+}
 const schema = `e2e_${randomUUID().replaceAll("-", "")}`;
 const url = new URL(process.env.TEST_DATABASE_URL);
 url.searchParams.set("schema", schema);
@@ -153,7 +168,76 @@ try {
   await playerPage.goto(`${base}/mac/${matchId}/rapor`);
   await expect(playerPage).toHaveURL(new RegExp(`/mac/${matchId}$`));
   assert.deepEqual(errors, []);
-  console.log("PASS: guest protection, profile, captain role, roster, draft, transfers, match creation, report, leaderboard, mobile menu and layout.");
+
+  // ---- Invitations and invite-link onboarding -----------------------------
+  // A captain creates a crew from the UI, which must mint an invite code.
+  await page.goto(`${base}/ekipler`);
+  // The crew name field also appears in the join form, so scope to the create panel.
+  await page.locator("form").filter({ hasText: "Ekipi sen kurduğunda" }).getByLabel("Ekip adı").fill("Davet Ekipi");
+  await page.getByRole("button", { name: /^Ekip kur$/ }).click();
+  await expect(page).toHaveURL(/\/ekip\/.+/);
+  const crewId = page.url().split("/ekip/")[1].split("?")[0];
+  const crew = await db.crew.findUniqueOrThrow({ where: { id: crewId } });
+  assert.match(crew.inviteCode, /^[34679ACDEFGHJKMNPQRTUVWXY]{8}$/, "creating a crew must mint an 8-character code");
+
+  // The share link is shown to the captain and points at /davet/<code>.
+  const inviteField = page.getByLabel("Davet bağlantısı");
+  await expect(inviteField).toHaveValue(`/davet/${crew.inviteCode}`);
+
+  // An in-app invitation: the captain searches for a registered player.
+  await page.getByRole("button", { name: /Oyuncu Davet Et/ }).click();
+  const inviteDialog = page.getByRole("dialog");
+  await inviteDialog.getByLabel("Oyuncu ara").fill("Test Player");
+  await expect(page.getByRole("button", { name: /^Davet gönder$/ })).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: /^Davet gönder$/ }).first().click();
+  await expect(page.getByText(/Davet gönderildi/)).toBeVisible();
+  const invitation = await db.crewInvitation.findFirstOrThrow({ where: { crewId, receiverId: player.id } });
+  assert.equal(invitation.status, "PENDING");
+
+  // The receiver sees the invitation in their inbox and can accept it.
+  await playerPage.goto(`${base}/ekip/${crewId}`);
+  await expect(playerPage.getByText(/ekibine davet edildin/)).toBeVisible();
+  await playerPage.getByRole("button", { name: /Kabul et/ }).click();
+  await expect(playerPage).toHaveURL(new RegExp(`/ekip/${crewId}\\?katildi=1`));
+  assert.notEqual(await db.crewMember.findUnique({ where: { crewId_userId: { crewId, userId: player.id } } }), null);
+  assert.equal((await db.crewInvitation.findUniqueOrThrow({ where: { id: invitation.id } })).status, "ACCEPTED");
+
+  // A signed-out visitor is sent to sign-in with the invite link as callbackUrl.
+  const guest = await browser.newContext();
+  const guestPage = await guest.newPage();
+  await guestPage.goto(`${base}/davet/${crew.inviteCode}`);
+  await expect(guestPage).toHaveURL(/\/api\/auth\/signin\?callbackUrl=/);
+  assert.match(guestPage.url(), /callbackUrl=%2Fdavet%2F/, "the invite link must survive the sign-in round trip");
+  await guest.close();
+
+  // A signed-in outsider following the link joins the crew automatically.
+  const joiner = await db.user.create({ data: { name: "Link Joiner", email: `joiner-${randomUUID()}@example.test` } });
+  const joinerToken = randomUUID();
+  await db.session.create({ data: { sessionToken: joinerToken, userId: joiner.id, expires: new Date(Date.now() + 3600_000) } });
+  const joinerContext = await browser.newContext();
+  await joinerContext.addCookies([{ name: "next-auth.session-token", value: joinerToken, url: base }]);
+  const joinerPage = await joinerContext.newPage();
+  await joinerPage.goto(`${base}/davet/${crew.inviteCode.toLowerCase()}`);
+  await expect(joinerPage).toHaveURL(new RegExp(`/ekip/${crewId}\\?katildi=1`), { timeout: 15_000 });
+  await expect(joinerPage.getByText(/başarıyla katıldın/)).toBeVisible();
+  assert.notEqual(await db.crewMember.findUnique({ where: { crewId_userId: { crewId, userId: joiner.id } } }), null);
+  // Re-opening the same link is a no-op rather than a duplicate membership.
+  await joinerPage.goto(`${base}/davet/${crew.inviteCode}`);
+  await expect(joinerPage).toHaveURL(new RegExp(`/ekip/${crewId}\\?katildi=0`));
+  assert.equal(await db.crewMember.count({ where: { crewId, userId: joiner.id } }), 1);
+  // The link page is not shown to a non-member.
+  await expect(joinerPage.getByLabel("Davet bağlantısı")).toHaveCount(0);
+  await joinerContext.close();
+
+  // An unknown code lands on the friendly invalid page, not a crash.
+  await page.goto(`${base}/davet/AAAAAAAA`);
+  await expect(page.getByRole("heading", { name: /Davet linki geçersiz/ })).toBeVisible();
+  await page.screenshot({ path: "test-results/invite-invalid.png", fullPage: true });
+  // A malformed code is routed to the same page instead of throwing.
+  await page.goto(`${base}/davet/bad`);
+  await expect(page.getByRole("heading", { name: /Davet linki geçersiz/ })).toBeVisible();
+
+  console.log("PASS: guest protection, profile, captain role, roster, draft, transfers, match creation, report, leaderboard, mobile menu, layout, in-app invitations and invite-link onboarding.");
 } catch (error) {
   console.error(serverLog);
   throw error;
@@ -162,4 +246,9 @@ try {
   if (server && server.exitCode === null) { server.kill(); await new Promise(resolve => { server.once("exit", resolve); setTimeout(resolve, 3000); }); }
   if (createdSchema) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
   await db.$disconnect();
+  // Only tear down the throwaway database this run created for itself.
+  if (embedded) {
+    await embedded.stop();
+    rmSync(embedded.folder, { recursive: true, force: true });
+  }
 }

@@ -39,10 +39,26 @@ export const authOptions = {
   theme: { colorScheme: "dark", brandColor: "#10b981" },
 } satisfies NextAuthOptions;
 
-export async function requireUser() {
+/**
+ * Requires a signed-in user, or redirects to sign-in.
+ *
+ * `callbackUrl` is passed straight through to NextAuth so that a visitor who
+ * followed an invite link lands back on that link after authenticating instead
+ * of on the home page. Only same-origin paths are honoured: an absolute URL here
+ * would turn the sign-in screen into an open redirect.
+ */
+export async function requireUser(callbackUrl?: string) {
   const session = await getServerSession(authOptions);
-  if (!session?.user?.id) redirect("/api/auth/signin");
+  if (!session?.user?.id) redirect(signInPath(callbackUrl));
   return session.user;
+}
+
+/** Builds a same-origin sign-in URL, defaulting to the home page. */
+export function signInPath(callbackUrl?: string) {
+  const target = callbackUrl?.trim();
+  // Reject absolute URLs and protocol-relative ones ("//evil.com").
+  if (!target || !target.startsWith("/") || target.startsWith("//")) return "/api/auth/signin";
+  return `/api/auth/signin?callbackUrl=${encodeURIComponent(target)}`;
 }
 
 // Match actions must ALSO check ownership; a role alone does not grant access.

@@ -10,6 +10,11 @@ import { createAuthAdapter } from "../lib/auth-adapter.ts";
 import { createGlobalMatch, deleteGlobalMatch, reportGlobalMatch } from "../lib/match-service.ts";
 import { ratePlayer, castPeerVote } from "../lib/rating-service.ts";
 import { aggregateCrewStandings } from "../lib/crew-standings.ts";
+import { generateInviteCode } from "../lib/validation.ts";
+import { CREW_MEMBER_LIMIT } from "../lib/football.ts";
+import {
+  acceptInvitation, inviteUserToCrew, joinCrewByInviteCode, rejectInvitation, searchInvitableUsers,
+} from "../lib/invitation-service.ts";
 
 test("baseline upgrade, Google adapter, global profiles and match constraints", {
   skip: !process.env.TEST_DATABASE_URL,
@@ -56,7 +61,12 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
 
     // Peer voting table and the crew-scoped match index arrive on top of that.
     cpSync("prisma/migrations/20261013000000_crew_rating_votes_and_match_scoping", path.join(migrations, "20261013000000_crew_rating_votes_and_match_scoping"), { recursive: true });
+    // Crews that predate this migration must come out of it with a usable code.
+    await db.$executeRaw`INSERT INTO "Crew" (id, name, "ownerId") VALUES ('pre-invite', 'Eski Ekip', 'legacy')`;
+    cpSync("prisma/migrations/20261014000000_crew_invitations_and_invite_links", path.join(migrations, "20261014000000_crew_invitations_and_invite_links"), { recursive: true });
     migrate();
+    const backfilled = await db.crew.findUniqueOrThrow({ where: { id: "pre-invite" } });
+    assert.match(backfilled.inviteCode, /^[0-9A-F]{8}$/, "a pre-existing crew must be backfilled with a code");
 
     // Match reporting writes per-season lines, so the suite needs a live season.
     await db.season.create({ data: { name: "Test Season", startDate: new Date("2026-01-01"), endDate: new Date("2026-12-31"), isActive: true } });
@@ -215,11 +225,11 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await assert.rejects(deleteGlobalMatch(db, user.id, globalId), /zaten silinmiş/);
 
     // --- crew peer voting ---------------------------------------------------
-    const crew = await db.crew.create({ data: { name: "Voters", ownerId: user.id } });
+    const crew = await db.crew.create({ data: { name: "Voters", ownerId: user.id, inviteCode: generateInviteCode() } });
     await db.crewMember.create({ data: { crewId: crew.id, userId: user.id, role: "OWNER" } });
     await db.crewMember.create({ data: { crewId: crew.id, userId: extras[0].id, role: "MEMBER" } });
     await db.crewMember.create({ data: { crewId: crew.id, userId: extras[1].id, role: "MEMBER" } });
-    const otherCrew = await db.crew.create({ data: { name: "Outsiders", ownerId: legacy.id } });
+    const otherCrew = await db.crew.create({ data: { name: "Outsiders", ownerId: legacy.id, inviteCode: generateInviteCode() } });
     await db.crewMember.create({ data: { crewId: otherCrew.id, userId: legacy.id, role: "OWNER" } });
     await db.crewMember.create({ data: { crewId: otherCrew.id, userId: otherCaptain.id, role: "MEMBER" } });
 
@@ -305,8 +315,95 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     const outsiderProfileRow = await profileOf(otherCaptain.id);
     const foreignLineup = [votedProfile.id, secondProfile.id, legacy.playerProfile.id, outsiderProfileRow.id].map((id, i) => ({ id, team: i < 2 ? "A" : "B", position: "MID" }));
     await assert.rejects(createGlobalMatch(db, user.id, { requestId: randomUUID(), date: new Date().toISOString(), crewId: crew.id, lineup: foreignLineup }), /ekibin/);
+    // ---- Invitations and invite links -------------------------------------
+    // A crew always carries a shareable code, and the unique index rejects a copy.
+    const freshCrew = await db.crew.create({ data: { name: "Link Crew", ownerId: user.id, inviteCode: generateInviteCode() } });
+    assert.match(freshCrew.inviteCode, /^[34679ACDEFGHJKMNPQRTUVWXY]{8}$/);
+    // `user` owns the crew, so it must also be a managing member: this is the
+    // state createCrew() establishes and the state assertManager() relies on.
+    await db.crewMember.create({ data: { crewId: freshCrew.id, userId: user.id, role: "OWNER" } });
+    // A duplicate code is refused by the unique index rather than by app code.
+    await assert.rejects(
+      db.crew.create({ data: { name: "Copycat", ownerId: user.id, inviteCode: freshCrew.inviteCode } }),
+      error => error.code === "P2002",
+      "a duplicate invite code must be rejected by the unique index",
+    );
 
-    console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages, historical snapshots, crew peer voting rules, stat rollback on delete and crew data isolation.");
+    // A plain member cannot invite even when the service is called directly.
+    const plainMember = await db.user.create({ data: { email: `member-${randomUUID()}@test.dev` } });
+    await db.crewMember.create({ data: { crewId: freshCrew.id, userId: plainMember.id, role: "MEMBER" } });
+    await assert.rejects(inviteUserToCrew(db, plainMember.id, freshCrew.id, legacy.id), /kaptan/);
+    const inviteTarget = await db.user.create({ data: { email: `target-${randomUUID()}@test.dev`, name: "Hedef Oyuncu" } });
+    await inviteUserToCrew(db, user.id, freshCrew.id, inviteTarget.id);
+    // Self-invite, existing member and unknown user are all refused.
+    await assert.rejects(inviteUserToCrew(db, user.id, freshCrew.id, user.id), /Kendini/);
+    await assert.rejects(inviteUserToCrew(db, user.id, freshCrew.id, plainMember.id), /üyesi/);
+    await assert.rejects(inviteUserToCrew(db, user.id, freshCrew.id, "yok-boyle-bir-kullanici"), /bulunamadı/);
+    // Re-inviting refreshes the single row instead of stacking duplicates.
+    await inviteUserToCrew(db, user.id, freshCrew.id, inviteTarget.id);
+    assert.equal(await db.crewInvitation.count({ where: { crewId: freshCrew.id, receiverId: inviteTarget.id } }), 1);
+
+    // Only the invited user may accept; another signed-in user is refused.
+    const invitation = await db.crewInvitation.findUniqueOrThrow({ where: { crewId_receiverId: { crewId: freshCrew.id, receiverId: inviteTarget.id } } });
+    await assert.rejects(acceptInvitation(db, legacy.id, invitation.id), /ait değil/);
+    assert.equal((await acceptInvitation(db, inviteTarget.id, invitation.id)).crewId, freshCrew.id);
+    assert.equal((await db.crewInvitation.findUniqueOrThrow({ where: { id: invitation.id } })).status, "ACCEPTED");
+    // A settled invitation cannot be accepted twice.
+    await assert.rejects(acceptInvitation(db, inviteTarget.id, invitation.id), /sonuçlanmış/);
+    assert.equal(await db.crewMember.count({ where: { crewId: freshCrew.id } }), 3);
+
+    // A rejected invitation never grants membership.
+    const rejectTarget = await db.user.create({ data: { email: `reject-${randomUUID()}@test.dev` } });
+    await inviteUserToCrew(db, user.id, freshCrew.id, rejectTarget.id);
+    const toReject = await db.crewInvitation.findUniqueOrThrow({ where: { crewId_receiverId: { crewId: freshCrew.id, receiverId: rejectTarget.id } } });
+    await rejectInvitation(db, rejectTarget.id, toReject.id);
+    // Join through a shareable link, then reopen the same link.
+    const linkJoiner = await db.user.create({ data: { email: `link-${randomUUID()}@test.dev` } });
+    const firstJoin = await joinCrewByInviteCode(db, linkJoiner.id, freshCrew.inviteCode.toLowerCase());
+    assert.equal(firstJoin.outcome, "joined", "the code is matched case-insensitively");
+    assert.equal(firstJoin.crewId, freshCrew.id);
+    const secondJoin = await joinCrewByInviteCode(db, linkJoiner.id, freshCrew.inviteCode);
+    assert.equal(secondJoin.outcome, "already", "re-opening the link must not duplicate the membership");
+    assert.equal(await db.crewMember.count({ where: { crewId: freshCrew.id, userId: linkJoiner.id } }), 1);
+    // A well-formed but unregistered code resolves to `invalid`; a code outside the
+    // alphabet (or the wrong length) is rejected before any query runs. `Z` and `B`
+    // are deliberately outside the alphabet, so "ZZZZZZZZ" would be a format error.
+    assert.deepEqual(await joinCrewByInviteCode(db, linkJoiner.id, "AAAAAAAA"), { outcome: "invalid" });
+    await assert.rejects(joinCrewByInviteCode(db, linkJoiner.id, "kisa"), /geçersiz|8 karakter/);
+    await assert.rejects(joinCrewByInviteCode(db, linkJoiner.id, "../../etc/passwd"), /geçersiz|8 karakter/);
+    await assert.rejects(joinCrewByInviteCode(db, linkJoiner.id, "ZZZZZZZZ"), /geçersiz|8 karakter/);
+    // Joining by link settles a pending invitation for the same crew.
+    const linkTarget = await db.user.create({ data: { email: `linktarget-${randomUUID()}@test.dev` } });
+    await inviteUserToCrew(db, user.id, freshCrew.id, linkTarget.id);
+    await joinCrewByInviteCode(db, linkTarget.id, freshCrew.inviteCode);
+    assert.equal((await db.crewInvitation.findUniqueOrThrow({ where: { crewId_receiverId: { crewId: freshCrew.id, receiverId: linkTarget.id } } })).status, "ACCEPTED");
+
+    // The invite search never exposes the requester or current members.
+    const searchable = await searchInvitableUsers(db, freshCrew.id, user.id, "Hedef");
+    assert.equal(searchable.some(entry => entry.id === user.id), false);
+    assert.equal(searchable.some(entry => entry.id === plainMember.id), false);
+    assert.equal(searchable.some(entry => entry.id === inviteTarget.id), false, "an existing member must not be offered again");
+    assert.equal(searchable.some(entry => entry.id === linkJoiner.id), false);
+    // A one-character query returns nothing rather than the whole user table.
+    assert.deepEqual(await searchInvitableUsers(db, freshCrew.id, user.id, "H"), []);
+
+    // A full crew refuses further joins through the link.
+    for (let i = 0; i < CREW_MEMBER_LIMIT; i++) {
+      const filler = await db.user.create({ data: { email: `filler-${i}-${randomUUID()}@test.dev` } });
+      await db.crewMember.create({ data: { crewId: freshCrew.id, userId: filler.id, role: "MEMBER" } });
+    }
+    const latecomer = await db.user.create({ data: { email: `late-${randomUUID()}@test.dev` } });
+    assert.equal((await joinCrewByInviteCode(db, latecomer.id, freshCrew.inviteCode)).outcome, "full");
+    assert.equal(await db.crewMember.count({ where: { crewId: freshCrew.id, userId: latecomer.id } }), 0);
+
+
+    assert.equal((await db.crewInvitation.findUniqueOrThrow({ where: { id: toReject.id } })).status, "REJECTED");
+    assert.equal(await db.crewMember.count({ where: { crewId: freshCrew.id, userId: rejectTarget.id } }), 0);
+    await assert.rejects(rejectInvitation(db, legacy.id, toReject.id), /ait değil/);
+
+
+
+    console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages, historical snapshots, crew peer voting rules, stat rollback on delete, crew data isolation, invitations and invite links.");
   } finally {
     if (createdSchema) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await db.$disconnect();

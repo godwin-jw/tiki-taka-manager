@@ -7,7 +7,14 @@ export type RosterPlayer = {
   position: Position; ovrRating: number; form: FormResult[];
 };
 export type DraftPlayer = RosterPlayer & { team: Team; position: Position };
-export type ActionState = { error?: string; success?: string };
+/**
+ * Result of a Server Action render.
+ *
+ * `results` carries optional structured payloads for inline widgets (the invite
+ * search box); keeping them on the shared state avoids a second parallel state
+ * channel just for search suggestions.
+ */
+export type ActionState = { error?: string; success?: string; results?: unknown };
 export const positionLabels: Record<Position, string> = { GK: "Kaleci", DEF: "Defans", MID: "Orta saha", FWD: "Forvet" };
 
 export function ratingTier(ovr: number) {
