@@ -10,7 +10,7 @@ import type { ActionState } from "@/lib/football";
 export async function saveMatch(_previous: ActionState, form: FormData): Promise<ActionState> {
   const user = await requireUser();
   let id: string;
-  try { id = await createGlobalMatch(prisma, user.id, { requestId: form.get("requestId"), date: form.get("date"), lineup: jsonField(form, "lineup"), teamAName: form.get("teamAName"), teamBName: form.get("teamBName") }); }
+  try { id = await createGlobalMatch(prisma, user.id, { requestId: form.get("requestId"), date: form.get("date"), lineup: jsonField(form, "lineup"), teamAName: form.get("teamAName"), teamBName: form.get("teamBName"), crewId: form.get("crewId") }); }
   catch (error) { return { error: error instanceof ValidationError ? error.message : "Maç kaydedilemedi. Lütfen tekrar deneyin." }; }
   revalidatePath("/", "layout");
   redirect(`/mac/${id}`);
@@ -31,7 +31,7 @@ export async function removeMatch(_previous: ActionState, form: FormData): Promi
     await deleteGlobalMatch(prisma, user.id, id);
   } catch (error) { return { error: error instanceof ValidationError ? error.message : "Maç silinemedi. Lütfen tekrar deneyin." }; }
   revalidatePath("/", "layout");
-  return { success: "Maç arşivden kaldırıldı. Oyuncu istatistikleri korundu." };
+  return { success: "Maç arşivden kaldırıldı ve o maçtan doğan istatistikler geri alındı." };
 }
 
 export async function submitMatchReport(_previous: ActionState, form: FormData): Promise<ActionState> {

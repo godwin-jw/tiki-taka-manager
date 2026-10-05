@@ -64,6 +64,8 @@ model User {
   playerProfile        PlayerProfile?
   createdMatches       Match[]              @relation("MatchCreator")
   playerRatings        PlayerRating[]
+  votesCast            PlayerRatingVote[]   @relation("VoteCaster")
+  votesReceived        PlayerRatingVote[]   @relation("VoteTarget")
   ownedCrews           Crew[]               @relation("CrewOwner")
   crewMemberships      CrewMember[]
   sentCrewRequests     CrewRequest[]        @relation("CrewRequestSender")
@@ -154,6 +156,7 @@ model Crew {
   members  CrewMember[]
   requests CrewRequest[]
   matches  Match[]
+  votes    PlayerRatingVote[]
 
   @@index([name])
   @@map("Crew")
@@ -245,6 +248,36 @@ model PlayerSeasonStat {
   @@index([seasonId, motmCount(sort: Desc)])
   @@index([seasonId, ovrRating(sort: Desc)])
   @@map("PlayerSeasonStat")
+}
+
+// One peer's OVR verdict for a team-mate, cast inside a single crew.
+//
+// Crew-scoped on purpose: a vote is only valid between two members of the same
+// crew, so the unique key is (crewId, voterId, targetUserId). The same pair may
+// therefore hold one vote per crew they share, which is why the published OVR
+// averages the votes per voter (latest wins) rather than per row.
+model PlayerRatingVote {
+  id        String   @id @default(cuid())
+  // The OVR this peer awards. Kept as an integer 0-99; the database also carries
+  // a CHECK constraint so out-of-range rows cannot be written by any path.
+  ovrRating Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  crewId String
+  crew   Crew   @relation(fields: [crewId], references: [id], onDelete: Cascade)
+
+  voterId String
+  voter   User   @relation("VoteCaster", fields: [voterId], references: [id], onDelete: Cascade)
+
+  targetUserId String
+  target       User   @relation("VoteTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  // Re-casting refreshes the existing row instead of stacking duplicates.
+  @@unique([crewId, voterId, targetUserId])
+  @@index([targetUserId])
+  @@index([crewId])
+  @@map("PlayerRatingVote")
 }
 
 // One equally weighted, editable assessment per voter and global player.

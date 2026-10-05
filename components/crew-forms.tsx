@@ -1,9 +1,84 @@
 "use client";
 
+import { useActionState, useState } from "react";
 import Link from "next/link";
-import { useActionState } from "react";
-import { Crown, LoaderCircle, LogOut, Send, Shield, UserPlus } from "lucide-react";
+import { Crown, LoaderCircle, LogOut, Send, Shield, ThumbsUp, UserPlus } from "lucide-react";
+import { submitPeerVote } from "@/app/actions/rating";
 import { cancelCrewRequestAction, createCrewAction, leaveCrewAction, requestToJoinAction, reviewCrewRequestAction } from "@/app/actions/crew";
+import {
+  Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
+  DialogHeader, DialogTitle, DialogTrigger,
+} from "@/components/ui/dialog";
+
+/**
+ * Peer OVR voting between crew-mates.
+ *
+ * The slider mirrors the stored score so re-casting opens on the current value,
+ * and the server re-validates crew membership regardless of what is submitted.
+ */
+export function PeerVoteButton({ crewId, targetUserId, name, image, currentOvr, existingVote }: {
+  crewId: string;
+  targetUserId: string;
+  name: string;
+  image: string | null;
+  currentOvr: number;
+  /** The viewer's own previous vote in this crew, if any. */
+  existingVote: number | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const [state, action, pending] = useActionState(submitPeerVote, {});
+  const [score, setScore] = useState(existingVote ?? Math.round(currentOvr));
+
+  return <Dialog open={open} onOpenChange={setOpen}>
+    <DialogTrigger asChild>
+      <Button variant="ghost" size="sm" className="shrink-0 text-zinc-400 hover:text-emerald-300" aria-label={`${name} için OVR oyu ver`}>
+        <ThumbsUp />Oy ver
+      </Button>
+    </DialogTrigger>
+    <DialogContent className="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-3">
+          <PlayerAvatar name={name} image={image} className="size-9" />
+          {name} için OVR oyu
+        </DialogTitle>
+        <DialogDescription>
+          OVR puanı, ekip arkadaşlarının verdiği oyların ortalamasıdır. Kendine oy veremezsin.
+        </DialogDescription>
+      </DialogHeader>
+      <form action={action} className="space-y-6">
+        <input type="hidden" name="crewId" value={crewId} />
+        <input type="hidden" name="targetUserId" value={targetUserId} />
+        <input type="hidden" name="ovrRating" value={score} />
+        <div className="space-y-3">
+          <div className="flex items-baseline justify-between">
+            <label htmlFor={`ovr-${targetUserId}`} className="text-sm font-medium">Puanın</label>
+            <span className="font-mono text-3xl font-bold text-emerald-300">{score}</span>
+          </div>
+          <input
+            id={`ovr-${targetUserId}`}
+            type="range"
+            min={0}
+            max={99}
+            value={score}
+            onChange={event => setScore(Number(event.target.value))}
+            className="w-full accent-emerald-400"
+          />
+          <div className="flex justify-between text-[10px] text-zinc-500"><span>0</span><span>99</span></div>
+        </div>
+        {state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}
+        {state.success && <p role="status" className="text-sm text-emerald-300">{state.success}</p>}
+        <DialogFooter>
+          <DialogClose type="button">Vazgeç</DialogClose>
+          <Button type="submit" disabled={pending}>
+            {pending ? <LoaderCircle className="animate-spin" /> : <ThumbsUp />}
+            {pending ? "Kaydediliyor…" : "Oyunu kaydet"}
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  </Dialog>;
+}
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

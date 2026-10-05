@@ -55,6 +55,21 @@ export function teamName(value: unknown, side: "A" | "B"): string {
   return cleaned;
 }
 
+/**
+ * Normalises an optional crew scope.
+ *
+ * Absent, null, "" and whitespace all mean "no crew", which is what the match
+ * builder sends for a global match. Any other value must be a real id, so a
+ * crafted form cannot smuggle an arbitrary string into the crewId column.
+ */
+export function optionalCrewId(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw new ValidationError("Geçersiz ekip seçimi.");
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  return text(trimmed, "Ekip", 1, 100);
+}
+
 export function parseLineup(value: unknown) {
   if (!Array.isArray(value) || value.length < 4 || value.length > 22 || value.length % 2 !== 0) throw new ValidationError("4–22 arasında çift sayıda oyuncu seçin.");
   const rows = value.map(item => {

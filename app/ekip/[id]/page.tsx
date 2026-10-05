@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { Crown, Lock, Shield, Swords, Target, Trophy, Users } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { getCrewDetail } from "@/lib/crew-service";
-import { BackToCrewsLink, CancelRequestButton, CrewRequestsPanel, JoinCrewForm, LeaveCrewButton } from "@/components/crew-forms";
+import { BackToCrewsLink, CancelRequestButton, CrewRequestsPanel, JoinCrewForm, LeaveCrewButton, PeerVoteButton } from "@/components/crew-forms";
 import { PlayerAvatar } from "@/components/player-avatar";
 import { OvrBadge } from "@/components/ovr-badge";
 import { Badge } from "@/components/ui/badge";
@@ -43,8 +43,6 @@ export default async function CrewPage({ params }: { params: Promise<{ id: strin
   const crew = await getCrewDetail(id, user.id);
   if (!crew) notFound();
 
-  const isSelf = user.id;
-
   return <div className="space-y-6">
     <BackToCrewsLink />
 
@@ -73,8 +71,8 @@ export default async function CrewPage({ params }: { params: Promise<{ id: strin
         <section aria-label="Ekip kadrosu" className="glass p-6">
           <h2 className="mb-4 flex items-center gap-2 font-semibold"><Users className="size-5 text-emerald-400" />Ekip kadrosu</h2>
           <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{crew.roster.map(member => (
-            <li key={member.memberId}>
-              <Link href={`/oyuncu/${member.userId}`} className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3 transition-colors hover:border-emerald-400/30">
+            <li key={member.memberId} className="flex items-center gap-2">
+              <Link href={`/oyuncu/${member.userId}`} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3 transition-colors hover:border-emerald-400/30">
                 <PlayerAvatar name={member.name} image={member.image} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-semibold">{member.name}</p>
@@ -82,6 +80,17 @@ export default async function CrewPage({ params }: { params: Promise<{ id: strin
                 </div>
                 <OvrBadge value={member.ovrRating} />
               </Link>
+              {/* Self-voting is blocked server-side, so the button is simply not offered. */}
+              {member.userId !== user.id && (
+                <PeerVoteButton
+                  crewId={crew.id}
+                  targetUserId={member.userId}
+                  name={member.name}
+                  image={member.image}
+                  currentOvr={member.ovrRating}
+                  existingVote={member.viewerVote}
+                />
+              )}
             </li>
           ))}</ul>
         </section>
@@ -101,6 +110,6 @@ export default async function CrewPage({ params }: { params: Promise<{ id: strin
     )}
 
     <p className="flex items-center gap-2 text-xs text-zinc-500"><Shield className="size-3 text-emerald-400" />Tablo yalnızca bu ekibin üyelerini kapsar; istatistikler onaylanan maç raporlarından gelir.</p>
-    <span className="sr-only">{isSelf ? "Kendi ekibin" : "Ekip sayfan"}</span>
+    <span className="sr-only">Ekip sayfan</span>
   </div>;
 }

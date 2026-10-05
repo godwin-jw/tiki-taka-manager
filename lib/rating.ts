@@ -30,3 +30,33 @@ export function overallRating(scores: AttributeScores): number {
 export function averageScores(averages: Record<RatingAttribute, number | null>): AttributeScores {
   return { pace: averages.pace ?? 0, shooting: averages.shooting ?? 0, passing: averages.passing ?? 0, dribbling: averages.dribbling ?? 0, defending: averages.defending ?? 0, physical: averages.physical ?? 0 };
 }
+
+/**
+ * Peer-vote averaging for the community OVR.
+ *
+ * Votes are stored per crew, so two players who share two crews can hold two rows
+ * for the same pair. Counting rows would let one teammate weigh twice, so votes
+ * are collapsed per voter first: the most recently updated vote wins.
+ *
+ * Returns null when nobody has voted yet, which lets callers fall back to the
+ * stored OVR instead of rendering a misleading zero.
+ */
+export function averagePeerVotes(votes: ReadonlyArray<{ voterId: string; ovrRating: number; updatedAt?: Date }>): number | null {
+  const latestPerVoter = new Map<string, { ovrRating: number; updatedAt: number }>();
+  for (const vote of votes) {
+    const at = vote.updatedAt ? vote.updatedAt.getTime() : 0;
+    const current = latestPerVoter.get(vote.voterId);
+    // Ties fall back to the later element so the newest row always wins.
+    if (!current || at >= current.updatedAt) latestPerVoter.set(vote.voterId, { ovrRating: vote.ovrRating, updatedAt: at });
+  }
+  if (latestPerVoter.size === 0) return null;
+  let total = 0;
+  for (const vote of latestPerVoter.values()) total += vote.ovrRating;
+  return total / latestPerVoter.size;
+}
+
+/** Clamps an OVR into the 0-99 range used by both the schema and the UI. */
+export function clampOvr(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(99, Math.max(0, Math.round(value)));
+}

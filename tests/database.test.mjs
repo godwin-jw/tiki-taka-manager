@@ -8,7 +8,8 @@ import { test } from "node:test";
 import { PrismaClient } from "@prisma/client";
 import { createAuthAdapter } from "../lib/auth-adapter.ts";
 import { createGlobalMatch, deleteGlobalMatch, reportGlobalMatch } from "../lib/match-service.ts";
-import { ratePlayer } from "../lib/rating-service.ts";
+import { ratePlayer, castPeerVote } from "../lib/rating-service.ts";
+import { aggregateCrewStandings } from "../lib/crew-standings.ts";
 
 test("baseline upgrade, Google adapter, global profiles and match constraints", {
   skip: !process.env.TEST_DATABASE_URL,
@@ -53,6 +54,13 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     cpSync("prisma/migrations/20261012000000_backfill_match_team_names", path.join(migrations, "20261012000000_backfill_match_team_names"), { recursive: true });
     migrate();
 
+    // Peer voting table and the crew-scoped match index arrive on top of that.
+    cpSync("prisma/migrations/20261013000000_crew_rating_votes_and_match_scoping", path.join(migrations, "20261013000000_crew_rating_votes_and_match_scoping"), { recursive: true });
+    migrate();
+
+    // Match reporting writes per-season lines, so the suite needs a live season.
+    await db.season.create({ data: { name: "Test Season", startDate: new Date("2026-01-01"), endDate: new Date("2026-12-31"), isActive: true } });
+
     const legacy = await db.user.findUniqueOrThrow({ where: { id: "legacy" }, include: { playerProfile: true, profiles: true } });
     assert.equal(legacy.role, "CAPTAIN");
     assert.equal(legacy.profiles.length, 1);
@@ -91,6 +99,10 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
 
     const extras = await Promise.all([1, 2].map(i => adapter.createUser({ email: `extra${i}@example.com`, emailVerified: null, name: `Extra ${i}`, image: null })));
     const extraProfiles = await db.playerProfile.findMany({ where: { userId: { in: extras.map(u => u.id) } }, orderBy: { id: "asc" } });
+    // Profiles are resolved by userId: cuid ordering does not follow creation order.
+    const profileOf = async (uid) => db.playerProfile.findUniqueOrThrow({ where: { userId: uid } });
+    const votedProfile = await profileOf(extras[0].id);
+    const secondProfile = await profileOf(extras[1].id);
     const ids = [profile.id, legacy.playerProfile.id, ...extraProfiles.map(p => p.id)];
     const input = { requestId: randomUUID(), date: new Date().toISOString(), lineup: ids.map((id, i) => ({ id, team: i < 2 ? "A" : "B", position: "MID", ovrRating: 99 })) };
     await assert.rejects(createGlobalMatch(db, extras[0].id, input), /kaptan/);
@@ -163,25 +175,138 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     const otherCaptain = await db.user.create({ data: { name: "Other Captain", email: `cap2-${randomUUID()}@example.test`, role: "CAPTAIN", playerProfile: { create: { position: "MID", ovrRating: 70 } } } });
     await assert.rejects(deleteGlobalMatch(db, otherCaptain.id, globalId), /kuran kaptan/);
 
-    // The crucial guarantee: deleting a match must not rewrite player history.
+    // Deleting a reported match rewinds exactly the statistics it produced.
     const beforeDelete = await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } });
+    const deleteSeason = await db.season.findFirst({ where: { isActive: true }, select: { id: true } });
+    const beforeSeason = deleteSeason ? await db.playerSeasonStat.findUniqueOrThrow({ where: { seasonId_playerProfileId: { seasonId: deleteSeason.id, playerProfileId: profile.id } } }) : null;
+    // This match awarded 1 goal + 1 MOTM, so the totals must drop by exactly that.
+    assert.ok(beforeDelete.goals >= 1 && beforeDelete.matchesPlayed >= 1 && beforeDelete.motmCount >= 1);
     await deleteGlobalMatch(db, user.id, globalId);
     assert.equal(await db.match.findUnique({ where: { id: globalId } }), null);
     // Roster rows cascaded with the match.
     assert.equal(await db.matchPlayer.count({ where: { matchId: globalId } }), 0);
-    // Career totals are untouched.
     const afterDelete = await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } });
-    assert.equal(afterDelete.goals, beforeDelete.goals);
-    assert.equal(afterDelete.assists, beforeDelete.assists);
-    assert.equal(afterDelete.matchesPlayed, beforeDelete.matchesPlayed);
-    assert.equal(afterDelete.motmCount, beforeDelete.motmCount);
-    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: legacy.playerProfile.id } })).assists, 1);
+    assert.equal(afterDelete.goals, beforeDelete.goals - 1);
+    assert.equal(afterDelete.matchesPlayed, beforeDelete.matchesPlayed - 1);
+    assert.equal(afterDelete.motmCount, beforeDelete.motmCount - 1);
+    // A rewind must never drive a counter below zero.
+    assert.ok(afterDelete.goals >= 0 && afterDelete.matchesPlayed >= 0 && afterDelete.motmCount >= 0);
+    // The season line moves in lockstep with the career line.
+    if (beforeSeason) {
+      const afterSeason = await db.playerSeasonStat.findUniqueOrThrow({ where: { seasonId_playerProfileId: { seasonId: deleteSeason.id, playerProfileId: profile.id } } });
+      assert.equal(afterSeason.goals, beforeSeason.goals - 1);
+      assert.equal(afterSeason.matchesPlayed, beforeSeason.matchesPlayed - 1);
+      assert.equal(afterSeason.motmCount, beforeSeason.motmCount - 1);
+    }
+    // The assisting player of the same match is rewound too.
+    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: legacy.playerProfile.id } })).assists, 0);
     // Other matches in the archive are unaffected.
     assert.notEqual(await db.match.findUnique({ where: { id: named } }), null);
+    // An unreported match never wrote any counter, so it must not rewind anything.
+    const pendingMatch = await createGlobalMatch(db, user.id, { requestId: randomUUID(), date: new Date().toISOString(), lineup: ids.map((id, i) => ({ id, team: i < 2 ? "A" : "B", position: "MID" })) });
+    const beforePending = await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } });
+    await deleteGlobalMatch(db, user.id, pendingMatch);
+    const afterPending = await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } });
+    assert.equal(afterPending.goals, beforePending.goals);
+    assert.equal(afterPending.assists, beforePending.assists);
+    assert.equal(afterPending.matchesPlayed, beforePending.matchesPlayed);
+    assert.equal(afterPending.motmCount, beforePending.motmCount);
     // Deleting twice is a clean, explicit error rather than a crash.
     await assert.rejects(deleteGlobalMatch(db, user.id, globalId), /zaten silinmiş/);
 
-    console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages and historical snapshots.");
+    // --- crew peer voting ---------------------------------------------------
+    const crew = await db.crew.create({ data: { name: "Voters", ownerId: user.id } });
+    await db.crewMember.create({ data: { crewId: crew.id, userId: user.id, role: "OWNER" } });
+    await db.crewMember.create({ data: { crewId: crew.id, userId: extras[0].id, role: "MEMBER" } });
+    await db.crewMember.create({ data: { crewId: crew.id, userId: extras[1].id, role: "MEMBER" } });
+    const otherCrew = await db.crew.create({ data: { name: "Outsiders", ownerId: legacy.id } });
+    await db.crewMember.create({ data: { crewId: otherCrew.id, userId: legacy.id, role: "OWNER" } });
+    await db.crewMember.create({ data: { crewId: otherCrew.id, userId: otherCaptain.id, role: "MEMBER" } });
+
+    await db.playerProfile.update({ where: { id: votedProfile.id }, data: { ovrRating: 10 } });
+    // Nobody may vote for themselves.
+    await assert.rejects(castPeerVote(db, user.id, crew.id, user.id, 99), /Kendine/);
+    // A non-member of the crew cannot vote inside it.
+    await assert.rejects(castPeerVote(db, legacy.id, crew.id, extras[0].id, 90), /ekibin/);
+    // A member cannot vote for someone outside their crew.
+    await assert.rejects(castPeerVote(db, user.id, crew.id, legacy.id, 90), /ekibin/);
+    // An unknown voter session is rejected.
+    await assert.rejects(castPeerVote(db, "ghost-user", crew.id, extras[0].id, 90), /oturumu/);
+    // Out-of-range and malformed scores never reach the table.
+    for (const bad of [-1, 100, 3.5, "", null, NaN, "abc"]) {
+      await assert.rejects(castPeerVote(db, user.id, crew.id, extras[0].id, bad));
+    }
+    assert.equal(await db.playerRatingVote.count(), 0);
+
+    // Two genuine crew-mates vote; the published OVR is their average.
+    await castPeerVote(db, user.id, crew.id, extras[0].id, 80);
+    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } })).ovrRating, 80);
+    await castPeerVote(db, extras[1].id, crew.id, extras[0].id, 60);
+    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } })).ovrRating, 70);
+    // Re-casting updates the same row instead of stacking duplicates.
+    await castPeerVote(db, user.id, crew.id, extras[0].id, 90);
+    assert.equal(await db.playerRatingVote.count({ where: { crewId: crew.id } }), 2);
+    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } })).ovrRating, 75);
+    // The unique key is crew-scoped, so the same pair may vote once per shared crew.
+    await assert.rejects(db.playerRatingVote.create({ data: { crewId: crew.id, voterId: user.id, targetUserId: extras[0].id, ovrRating: 50 } }), { code: "P2002" });
+    // The CHECK constraint holds even for a raw write that bypasses validation.
+    await assert.rejects(db.$executeRaw`INSERT INTO "PlayerRatingVote" ("id", "ovrRating", "updatedAt", "crewId", "voterId", "targetUserId") VALUES ('raw', 150, NOW(), ${crew.id}, ${user.id}, ${extras[0].id})`);
+
+    // Leaving the crew revokes the ability to vote, and the published OVR refreshes.
+    await db.crewMember.delete({ where: { crewId_userId: { crewId: crew.id, userId: extras[1].id } } });
+    await assert.rejects(castPeerVote(db, extras[1].id, crew.id, extras[0].id, 10), /ekibin/);
+
+    // --- crew data isolation ------------------------------------------------
+    const inCrewProfile = votedProfile;
+    const outsiderProfile = secondProfile;
+    const season = await db.season.findFirst({ where: { isActive: true }, select: { id: true } });
+    assert.notEqual(season, null, 'an active season is required for the isolation checks');
+    const seasonId = season.id;
+    const scopedMatch = await db.match.create({ data: { date: new Date(), createdById: user.id, status: "COMPLETED", isCompleted: true, crewId: crew.id, seasonId, teamAScore: 3, teamBScore: 0, reportedAt: new Date() } });
+    const globalMatch = await db.match.create({ data: { date: new Date(), createdById: user.id, status: "COMPLETED", isCompleted: true, crewId: null, seasonId, teamAScore: 5, teamBScore: 0, reportedAt: new Date() } });
+    await db.matchPlayer.create({ data: { matchId: scopedMatch.id, playerProfileId: inCrewProfile.id, team: "A", position: "MID", ovrAtMatch: 70, goals: 3 } });
+    await db.matchPlayer.create({ data: { matchId: globalMatch.id, playerProfileId: inCrewProfile.id, team: "A", position: "MID", ovrAtMatch: 70, goals: 5 } });
+    // The season line deliberately mixes both scopes; the crew view must not.
+    // The platform-wide line deliberately mixes both scopes; upsert since a
+    // reported match may already have written one for this player.
+    await db.playerSeasonStat.upsert({
+      where: { seasonId_playerProfileId: { seasonId, playerProfileId: inCrewProfile.id } },
+      create: { seasonId, playerProfileId: inCrewProfile.id, goals: 8, assists: 0, matchesPlayed: 2, motmCount: 0 },
+      update: { goals: 8, assists: 0, matchesPlayed: 2, motmCount: 0 },
+    });
+
+    const scopedTotals = await aggregateCrewStandings(db, crew.id, seasonId, [inCrewProfile.id, outsiderProfile.id, legacy.playerProfile.id]);
+    const leaderRow = scopedTotals.get(inCrewProfile.id);
+    assert.notEqual(leaderRow, undefined);
+    // Only the crew-scoped match counts: 3 goals, not the 8 on the season line.
+    assert.equal(leaderRow.goals, 3);
+    assert.equal(leaderRow.matchesPlayed, 1);
+    // A player who never played for this crew has no row, so the UI shows zero.
+    assert.equal(scopedTotals.has(legacy.playerProfile.id), false);
+    // The other crew cannot see this crew match either.
+    const otherTotals = await aggregateCrewStandings(db, otherCrew.id, seasonId, [inCrewProfile.id, legacy.playerProfile.id]);
+    assert.equal(otherTotals.has(inCrewProfile.id), false);
+    // A crew match's goals never bleed into a global-scope read.
+    const globalTotals = await aggregateCrewStandings(db, crew.id, seasonId, [inCrewProfile.id]);
+    assert.equal(globalTotals.get(inCrewProfile.id).goals, 3);
+
+    // A crew match may only field that crew's members. `legacy` joins so a full
+    // four-player squad can be formed; `extras[1]` was removed earlier to prove
+    // that leaving revokes voting, so it is restored first.
+    await db.crewMember.create({ data: { crewId: crew.id, userId: legacy.id, role: "MEMBER" } });
+    await db.crewMember.create({ data: { crewId: crew.id, userId: extras[1].id, role: "MEMBER" } });
+    const crewLineup = [votedProfile.id, secondProfile.id, legacy.playerProfile.id, profile.id].map((id, i) => ({ id, team: i < 2 ? "A" : "B", position: "MID" }));
+    const crewMatchId = await createGlobalMatch(db, user.id, { requestId: randomUUID(), date: new Date().toISOString(), crewId: crew.id, lineup: crewLineup });
+    assert.equal((await db.match.findUniqueOrThrow({ where: { id: crewMatchId } })).crewId, crew.id);
+    // Posting to a crew the captain does not belong to is refused outright.
+    await assert.rejects(createGlobalMatch(db, user.id, { requestId: randomUUID(), date: new Date().toISOString(), crewId: otherCrew.id, lineup: crewLineup }), /oldu.*n ekip/);
+    // A captain cannot roster anyone outside the crew they are posting to.
+    // `otherCaptain` never joined this crew, so any lineup including it is invalid.
+    const outsiderProfileRow = await profileOf(otherCaptain.id);
+    const foreignLineup = [votedProfile.id, secondProfile.id, legacy.playerProfile.id, outsiderProfileRow.id].map((id, i) => ({ id, team: i < 2 ? "A" : "B", position: "MID" }));
+    await assert.rejects(createGlobalMatch(db, user.id, { requestId: randomUUID(), date: new Date().toISOString(), crewId: crew.id, lineup: foreignLineup }), /ekibin/);
+
+    console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages, historical snapshots, crew peer voting rules, stat rollback on delete and crew data isolation.");
   } finally {
     if (createdSchema) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await db.$disconnect();

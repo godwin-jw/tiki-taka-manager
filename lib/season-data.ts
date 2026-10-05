@@ -1,6 +1,7 @@
 import "server-only";
 
 import { prisma } from "@/lib/prisma";
+import { aggregateCrewStandings } from "@/lib/crew-standings";
 
 /** All seasons, newest first, plus which one is currently live. */
 export async function listSeasons() {
@@ -55,7 +56,14 @@ export async function getSeasonTimeline(playerProfileId: string): Promise<Season
   });
 }
 
-/** Crew-wide standings for the given season, restricted to crew members. */
+/**
+ * Crew-wide standings for the given season, restricted to crew members.
+ *
+ * Isolation: the member list AND the statistics are both crew-scoped. A player's
+ * season line can contain results from matches played in other crews, so those
+ * are filtered out by requiring the underlying match to belong to this crew.
+ * Counting every season row would leak another crew's scorers into this table.
+ */
 export async function getCrewSeasonLeaders(crewId: string, seasonId: string) {
   const crew = await prisma.crew.findUnique({
     where: { id: crewId },
@@ -70,24 +78,24 @@ export async function getCrewSeasonLeaders(crewId: string, seasonId: string) {
   const profileIds = members.map((member) => member.user.playerProfile?.id).filter((id): id is string => Boolean(id));
   if (profileIds.length === 0) return { id: crew.id, name: crew.name, rows: [] };
 
-  const stats = await prisma.playerSeasonStat.findMany({
-    where: { seasonId, playerProfileId: { in: profileIds } },
-    select: { playerProfileId: true, goals: true, assists: true, motmCount: true, ovrRating: true },
-  });
-  const byProfile = new Map(stats.map((stat) => [stat.playerProfileId, stat]));
+  // Aggregate this crew's own match rows instead of trusting the platform-wide
+  // season line, so nothing from another crew (or a global match) can surface.
+  const totals = await aggregateCrewStandings(prisma, crewId, seasonId, profileIds);
 
   const rows = members.flatMap((member) => {
     const profile = member.user.playerProfile;
     if (!profile) return [];
-    const stat = byProfile.get(profile.id);
+    const scoped = totals.get(profile.id);
     return [{
       userId: member.user.id,
       name: member.user.name ?? "Oyuncu",
       position: profile.position,
-      ovrRating: stat?.ovrRating ?? profile.ovrRating,
-      goals: stat?.goals ?? 0,
-      assists: stat?.assists ?? 0,
-      motmCount: stat?.motmCount ?? 0,
+      // OVR is the crew-vote published value; never another crew's tally.
+      ovrRating: profile.ovrRating,
+      goals: scoped?.goals ?? 0,
+      assists: scoped?.assists ?? 0,
+      matchesPlayed: scoped?.matchesPlayed ?? 0,
+      motmCount: scoped?.motmCount ?? 0,
     }];
   });
 

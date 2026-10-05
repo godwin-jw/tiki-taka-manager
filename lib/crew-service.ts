@@ -1,6 +1,7 @@
 import "server-only";
 
 import { prisma } from "@/lib/prisma";
+import { getCrewSeasonLeaders } from "@/lib/season-data";
 import { CREW_MEMBER_LIMIT, canManageCrew, type CrewRoleName } from "@/lib/football";
 
 export class CrewError extends Error {}
@@ -99,20 +100,40 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
     select: { status: true },
   });
 
-  const roster = crew.members.map((member) => ({
-    memberId: member.id,
-    role: member.role as CrewRoleName,
-    userId: member.user.id,
-    name: member.user.name ?? "Oyuncu",
-    image: member.user.image,
-    position: member.user.playerProfile?.position ?? ("MID" as const),
-    ovrRating: member.user.playerProfile?.ovrRating ?? 0,
-    goals: member.user.playerProfile?.goals ?? 0,
-    assists: member.user.playerProfile?.assists ?? 0,
-    matchesPlayed: member.user.playerProfile?.matchesPlayed ?? 0,
-    motmCount: member.user.playerProfile?.motmCount ?? 0,
-    hasProfile: member.user.playerProfile !== null,
-  }));
+  // Crew-scoped season totals for the leaderboards. The career counters on
+  // PlayerProfile are platform-wide (they include other crews and global matches),
+  // so they must NOT be used here: that would leak outside scorers into this crew.
+  const activeSeason = await prisma.season.findFirst({ where: { isActive: true }, select: { id: true } });
+  const standings = activeSeason ? await getCrewSeasonLeaders(crewId, activeSeason.id) : null;
+  const statByUser = new Map((standings?.rows ?? []).map(row => [row.userId, row]));
+  // The viewer's own vote per member, so the dialog can reopen on the stored value.
+  const viewerVotes = isMember
+    ? await prisma.playerRatingVote.findMany({
+        where: { crewId, voterId: viewerId },
+        select: { targetUserId: true, ovrRating: true },
+      })
+    : [];
+  const voteByUser = new Map(viewerVotes.map(vote => [vote.targetUserId, vote.ovrRating]));
+
+  const roster = crew.members.map((member) => {
+    const scoped = statByUser.get(member.user.id);
+    return {
+      memberId: member.id,
+      role: member.role as CrewRoleName,
+      userId: member.user.id,
+      name: member.user.name ?? "Oyuncu",
+      image: member.user.image,
+      position: member.user.playerProfile?.position ?? ("MID" as const),
+      ovrRating: member.user.playerProfile?.ovrRating ?? 0,
+      // Career numbers are deliberately crew-scoped when a season exists.
+      goals: scoped?.goals ?? 0,
+      assists: scoped?.assists ?? 0,
+      matchesPlayed: scoped?.matchesPlayed ?? 0,
+      motmCount: scoped?.motmCount ?? 0,
+      hasProfile: member.user.playerProfile !== null,
+      viewerVote: voteByUser.get(member.user.id) ?? null,
+    };
+  });
 
   return {
     id: crew.id,

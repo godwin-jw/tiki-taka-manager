@@ -1,6 +1,74 @@
 import type { PrismaClient } from "@prisma/client";
-import { averageScores, overallRating, parseRating } from "./rating.ts";
-import { text, ValidationError } from "./validation.ts";
+import { averagePeerVotes, averageScores, clampOvr, overallRating, parseRating } from "./rating.ts";
+import { integer, text, ValidationError } from "./validation.ts";
+
+/** The transactional client Prisma hands to a `$transaction` callback. */
+type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+
+/**
+ * Publishes a player's OVR from their crew votes and returns it.
+ *
+ * Shared by the vote service and the read paths so the profile, the player card
+ * and the crew leaderboard can never disagree about a published OVR.
+ */
+export async function publishPeerOvr(tx: Tx, targetUserId: string) {
+  const votes = await tx.playerRatingVote.findMany({
+    where: { targetUserId },
+    select: { voterId: true, ovrRating: true, updatedAt: true },
+  });
+  const average = averagePeerVotes(votes);
+  const target = await tx.user.findUnique({ where: { id: targetUserId }, select: { playerProfile: { select: { id: true } } } });
+  // No votes yet: keep whatever OVR the profile already carries rather than
+  // resetting a real rating to zero.
+  if (average === null || !target?.playerProfile) return null;
+  const ovrRating = clampOvr(average);
+  await tx.playerProfile.update({ where: { id: target.playerProfile.id }, data: { ovrRating } });
+  return ovrRating;
+}
+
+/**
+ * Records (or refreshes) one peer's OVR vote inside a crew.
+ *
+ * Security rules, all enforced server-side inside the transaction:
+ *  - the voter must be an authenticated user;
+ *  - nobody may vote for themselves;
+ *  - voter and target must BOTH hold an active membership in the same crew, so a
+ *    vote can never cross crew boundaries;
+ *  - the score must be an integer 0-99.
+ *
+ * Re-casting updates the same row, so a player cannot inflate their average by
+ * submitting repeatedly.
+ */
+export async function castPeerVote(db: PrismaClient, voterId: string, crewId: unknown, targetUserId: unknown, value: unknown) {
+  const crew = text(crewId, "Ekip", 1, 100);
+  const target = text(targetUserId, "Oyuncu", 1, 100);
+  const ovrRating = integer(value, "OVR puanı", 0, 99);
+  if (target === voterId) throw new ValidationError("Kendine oy veremezsin.");
+
+  return db.$transaction(async (tx) => {
+    if (!await tx.user.findUnique({ where: { id: voterId }, select: { id: true } })) throw new ValidationError("Geçerli bir kullanıcı oturumu gerekiyor.");
+
+    // One query, both memberships: the pair must share this exact crew.
+    const shared = await tx.crewMember.findMany({
+      where: { crewId: crew, OR: [{ userId: voterId }, { userId: target }] },
+      select: { userId: true },
+    });
+    const userIds = new Set(shared.map((row) => row.userId));
+    if (!userIds.has(voterId) || !userIds.has(target)) throw new ValidationError("Yalnızca aynı ekibin üyeleri birbirine oy verebilir.");
+
+    // Serialises competing votes before the average is recomputed.
+    await tx.$queryRaw`SELECT "id" FROM "GlobalPlayerProfile" WHERE "userId" = ${target} FOR UPDATE`;
+
+    await tx.playerRatingVote.upsert({
+      where: { crewId_voterId_targetUserId: { crewId: crew, voterId, targetUserId: target } },
+      create: { crewId: crew, voterId, targetUserId: target, ovrRating },
+      update: { ovrRating },
+    });
+
+    const published = await publishPeerOvr(tx, target);
+    return { ovrRating: published ?? ovrRating };
+  }, { isolationLevel: "ReadCommitted", maxWait: 10_000, timeout: 20_000 });
+}
 
 // Internal service: raterId must come from the authenticated session, not the form.
 export async function ratePlayer(db: PrismaClient, raterId: string, targetId: unknown, input: unknown) {

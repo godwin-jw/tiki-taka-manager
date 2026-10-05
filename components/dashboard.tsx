@@ -19,10 +19,13 @@ async function Leaderboards() {
 }
 
 export async function Dashboard({ userId, name }: { userId: string; name: string }) {
+  // The platform dashboard is the global archive: crew-scoped matches belong to
+  // their crew's own page and must not leak in here, and the reverse must not
+  // happen either, so both the aggregate and the list filter on crewId: null.
   const [playerCount, matchCount, total, matches, groups] = await Promise.all([
-    prisma.user.count(), prisma.match.count({ where: { status: "COMPLETED", groupId: null } }),
+    prisma.user.count(), prisma.match.count({ where: { status: "COMPLETED", groupId: null, crewId: null } }),
     prisma.playerProfile.aggregate({ _sum: { goals: true } }),
-    prisma.match.findMany({ where: { groupId: null }, orderBy: [{ date: "desc" }, { id: "desc" }], take: 8, select: { id: true, date: true, status: true, createdById: true, teamAName: true, teamBName: true, teamAScore: true, teamBScore: true, _count: { select: { players: true } } } }),
+    prisma.match.findMany({ where: { groupId: null, crewId: null }, orderBy: [{ date: "desc" }, { id: "desc" }], take: 8, select: { id: true, date: true, status: true, createdById: true, teamAName: true, teamBName: true, teamAScore: true, teamBScore: true, _count: { select: { players: true } } } }),
     prisma.group.findMany({ where: { OR: [{ captainId: userId }, { players: { some: { userId } } }] }, select: { id: true, name: true }, orderBy: { createdAt: "desc" } }),
   ]);
   return <div className="space-y-8"><div className="flex flex-wrap items-center justify-between gap-4"><div><p className="eyebrow">CLUB OVERVIEW</p><h1 className="mt-2 text-3xl font-bold tracking-tight">Hoş geldin, {name.split(" ")[0]}.</h1><p className="mt-2 text-sm text-zinc-400">Bir sonraki maç, bir sonraki hikâye.</p></div><Button asChild><Link href="/yeni-mac"><Plus />Yeni maç oluştur</Link></Button></div>

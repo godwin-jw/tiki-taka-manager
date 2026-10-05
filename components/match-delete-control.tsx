@@ -54,8 +54,8 @@ export function MatchDeleteControl({ matchId, teamAName, teamBName }: { matchId:
           <strong>{teamAName}</strong> – <strong>{teamBName}</strong> karşılaşması arşivden kalıcı olarak kaldırılacak.
           <span className="mt-3 block font-medium text-rose-300">Bu işlem geri alınamaz.</span>
           <span className="mt-2 block text-xs">
-            Maç kaydı, kadrosu ve raporu silinir. Oyuncuların geçmiş gol, asist ve maçın adamı istatistikleri
-            korunur; yalnızca bu maça ait satırlar arşivden düşer.
+            Maç kaydı, kadrosu ve raporu silinir. Bu maçtan doğan gol, asist, maçın adamı ve maç sayısı
+            istatistikleri de oyuncuların toplamlarından düşülür.
           </span>
         </AlertDialogDescription>
       </AlertDialogHeader>
