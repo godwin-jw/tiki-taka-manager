@@ -11,6 +11,7 @@ import {
   rejectInvitation,
   searchInvitableUsers,
 } from "@/lib/invitation-service";
+import { canManageCrew } from "@/lib/football";
 import { ValidationError } from "@/lib/validation";
 import type { ActionState } from "@/lib/football";
 
@@ -32,7 +33,8 @@ export async function searchUsersToInvite(_previous: ActionState, form: FormData
     const crewId = String(form.get("crewId") ?? "");
     const query = String(form.get("query") ?? "");
     const membership = await prisma.crewMember.findUnique({ where: { crewId_userId: { crewId, userId: user.id } }, select: { role: true } });
-    if (membership?.role !== "OWNER" && membership?.role !== "CAPTAIN") return { error: "Yalnızca ekip kaptanı davet gönderebilir." };
+    // One rule for every officer tier: OWNER, CAPTAIN and CO_CAPTAIN may invite.
+    if (!canManageCrew(membership?.role)) return { error: "Yalnızca ekip kaptanı davet gönderebilir." };
     const results = await searchInvitableUsers(prisma, crewId, user.id, query);
     return { results: results.map(entry => ({
       id: entry.id,

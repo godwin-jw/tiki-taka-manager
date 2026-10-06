@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { LockKeyhole } from "lucide-react";
+import { LockKeyhole, Users } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getRatingSummary } from "@/lib/rating-data";
@@ -20,6 +20,14 @@ export default async function PlayerPage({ params }: { params: Promise<{ id: str
   if (!player?.playerProfile) notFound();
   const profile = player.playerProfile;
   const isSelf = player.id === user.id;
+  // GÖREV 2: attribute ratings are crew-scoped — only members of a crew the
+  // target also belongs to may submit one. The server enforces the same rule.
+  const sharesCrew = isSelf
+    ? false
+    : (await prisma.crewMember.findFirst({
+        where: { userId: user.id, crew: { members: { some: { userId: player.id } } } },
+        select: { crewId: true },
+      })) !== null;
   const [summary, myRating] = await Promise.all([
     getRatingSummary(profile.id),
     prisma.playerRating.findUnique({ where: { raterId_playerProfileId: { raterId: user.id, playerProfileId: profile.id } }, select: { pace: true, shooting: true, passing: true, dribbling: true, defending: true, physical: true } }),
@@ -35,6 +43,8 @@ export default async function PlayerPage({ params }: { params: Promise<{ id: str
       </div>
     </section>
     <RatingSummary {...summary} ovr={profile.ovrRating} />
-    {isSelf ? <section className="glass space-y-4 p-6"><p className="flex items-center gap-2 text-sm text-zinc-400"><LockKeyhole className="size-4" />Kendini değerlendiremezsin. OVR puanın diğer oyuncuların değerlendirmelerinden oluşur.</p><Button asChild variant="outline"><Link href="/profil">Kişisel bilgilerimi düzenle</Link></Button></section> : <RatingForm key={profile.id} playerProfileId={profile.id} initialScores={myRating} />}
+    {isSelf ? <section className="glass space-y-4 p-6"><p className="flex items-center gap-2 text-sm text-zinc-400"><LockKeyhole className="size-4" />Kendini değerlendiremezsin. OVR puanın diğer oyuncuların değerlendirmelerinden oluşur.</p><Button asChild variant="outline"><Link href="/profil">Kişisel bilgilerimi düzenle</Link></Button></section>
+      : !sharesCrew ? <section className="glass space-y-4 p-6"><p className="flex items-center gap-2 text-sm text-zinc-400"><Users className="size-4 text-emerald-400" />Bu oyuncuyla aynı ekipte değilsin. Değerlendirmeler yalnızca ekip arkadaşları arasındaki oylarla oluşur.</p><Button asChild variant="outline"><Link href="/ekipler">Ekiplerime git</Link></Button></section>
+      : <RatingForm key={profile.id} playerProfileId={profile.id} initialScores={myRating} />}
   </div>;
 }

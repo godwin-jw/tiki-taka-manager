@@ -1,16 +1,22 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, Copy, Crown, Link2, LoaderCircle, LogOut, Send, Shield, ThumbsUp, Trash2, UserPlus } from "lucide-react";
+import { Check, Copy, Crown, Ellipsis, Link2, LoaderCircle, LogOut, Send, Shield, ThumbsUp, Trash2, UserPlus } from "lucide-react";
 import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
-  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { submitPeerVote } from "@/app/actions/rating";
 import { searchUsersToInvite, sendCrewInvitation } from "@/app/actions/invitation";
 import { acceptCrewInvitation, rejectCrewInvitation } from "@/app/actions/invitation";
-import { cancelCrewRequestAction, createCrewAction, kickCrewMemberAction, leaveCrewAction, requestToJoinAction, reviewCrewRequestAction } from "@/app/actions/crew";
+import { cancelCrewRequestAction, createCrewAction, kickCrewMemberAction, leaveCrewAction, requestToJoinAction, reviewCrewRequestAction, setCrewRoleAction } from "@/app/actions/crew";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle, DialogTrigger,
@@ -19,10 +25,11 @@ import {
 /**
  * Peer OVR voting between crew-mates.
  *
+ * The dialog body is controlled by RosterMemberMenu (no trigger of its own).
  * The slider mirrors the stored score so re-casting opens on the current value,
  * and the server re-validates crew membership regardless of what is submitted.
  */
-export function PeerVoteButton({ crewId, targetUserId, name, image, currentOvr, existingVote }: {
+function VoteDialog({ crewId, targetUserId, name, image, currentOvr, existingVote, open, onOpenChange }: {
   crewId: string;
   targetUserId: string;
   name: string;
@@ -30,17 +37,20 @@ export function PeerVoteButton({ crewId, targetUserId, name, image, currentOvr, 
   currentOvr: number;
   /** The viewer's own previous vote in this crew, if any. */
   existingVote: number | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState(submitPeerVote, {});
   const [score, setScore] = useState(existingVote ?? Math.round(currentOvr));
+  // Close only after the server confirms, so validation errors stay readable.
+  const lastState = useRef(state);
+  useEffect(() => {
+    if (state === lastState.current) return;
+    lastState.current = state;
+    if (state.success) onOpenChange(false);
+  }, [state, onOpenChange]);
 
-  return <Dialog open={open} onOpenChange={setOpen}>
-    <DialogTrigger asChild>
-      <Button variant="ghost" size="sm" className="shrink-0 text-zinc-400 hover:text-emerald-300" aria-label={`${name} için OVR oyu ver`}>
-        <ThumbsUp />Oy ver
-      </Button>
-    </DialogTrigger>
+  return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent className="sm:max-w-md">
       <DialogHeader>
         <DialogTitle className="flex items-center gap-3">
@@ -320,34 +330,28 @@ export function JoinSuccessToast({ joined, crewName }: { joined: boolean; crewNa
 }
 
 /**
- * Captain-only control that removes a member from the crew.
+ * Destructive confirm that removes a member from the crew.
  *
- * The button is not rendered for the crew owner, for the acting user, or for
- * ordinary members, so the UI mirrors the server rules. AlertDialog is used
- * because the action is destructive and irreversible from the crew's view.
+ * Controlled by RosterMemberMenu: the row menu decides when it opens, and the
+ * dialog only closes once kickCrewMemberAction confirms the removal, so a
+ * server refusal (owner, fellow officer, …) stays visible instead of vanishing.
  */
-export function KickMemberButton({ crewId, targetUserId, name, disabled }: {
+function KickDialog({ crewId, targetUserId, name, open, onOpenChange }: {
   crewId: string;
   targetUserId: string;
   name: string;
-  /** Set for roles the server would refuse, to explain why instead of failing. */
-  disabled?: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const [state, action, pending] = useActionState(kickCrewMemberAction, {});
-  return <AlertDialog>
-    <AlertDialogTrigger asChild>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        disabled={pending || disabled}
-        title={disabled ? "Bu üyeyi çıkaramazsın" : `${name} kişisini ekipten çıkar`}
-        aria-label={`${name} kişisini ekipten çıkar`}
-        className="shrink-0 text-zinc-500 hover:text-rose-300"
-      >
-        {pending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}
-      </Button>
-    </AlertDialogTrigger>
+  // Close only after the server confirms, so a refusal stays readable.
+  const lastState = useRef(state);
+  useEffect(() => {
+    if (state === lastState.current) return;
+    lastState.current = state;
+    if (state.success) onOpenChange(false);
+  }, [state, onOpenChange]);
+  return <AlertDialog open={open} onOpenChange={onOpenChange}>
     <AlertDialogContent>
       <AlertDialogHeader>
         <AlertDialogTitle>{name} ekipten çıkarılsın mı?</AlertDialogTitle>
@@ -359,13 +363,11 @@ export function KickMemberButton({ crewId, targetUserId, name, disabled }: {
       {state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}
       <AlertDialogFooter>
         <AlertDialogCancel>Vazgeç</AlertDialogCancel>
-        <AlertDialogAction asChild>
-          {/* form points at the hidden form below so crewId/userId travel with the
-              submit. A formAction dispatch would not carry those fields. */}
-          <Button type="submit" form={`kick-form-${crewId}-${targetUserId}`} variant="destructive" disabled={pending}>
-            {pending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Çıkar
-          </Button>
-        </AlertDialogAction>
+        {/* form points at the hidden form below so crewId/userId travel with the
+            submit. A formAction dispatch would not carry those fields. */}
+        <Button type="submit" form={`kick-form-${crewId}-${targetUserId}`} variant="destructive" disabled={pending}>
+          {pending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Çıkar
+        </Button>
       </AlertDialogFooter>
     </AlertDialogContent>
     {/* Carries the target for the submit above; kept out of the trigger's tree. */}
@@ -374,6 +376,144 @@ export function KickMemberButton({ crewId, targetUserId, name, disabled }: {
       <input type="hidden" name="userId" value={targetUserId} />
     </form>
   </AlertDialog>;
+}
+
+/**
+ * Confirm dialog that grants or revokes the CO_CAPTAIN role.
+ *
+ * Only the crew OWNER ever sees this (RosterMemberMenu gates it), and the
+ * server re-checks that rule inside setCrewMemberRole. Both directions share
+ * one dialog because the difference is a single hidden field plus the wording.
+ */
+function RoleDialog({ crewId, targetUserId, name, role, open, onOpenChange }: {
+  crewId: string;
+  targetUserId: string;
+  name: string;
+  /** The role to WRITE on confirm: CO_CAPTAIN to promote, MEMBER to demote. */
+  role: "MEMBER" | "CO_CAPTAIN";
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [state, action, pending] = useActionState(setCrewRoleAction, {});
+  // Close only after the server confirms, so a refusal stays readable.
+  const lastState = useRef(state);
+  useEffect(() => {
+    if (state === lastState.current) return;
+    lastState.current = state;
+    if (state.success) onOpenChange(false);
+  }, [state, onOpenChange]);
+  const promoting = role === "CO_CAPTAIN";
+  return <AlertDialog open={open} onOpenChange={onOpenChange}>
+    <AlertDialogContent>
+      <AlertDialogHeader>
+        <AlertDialogTitle>{promoting ? `${name} kaptan yardımcısı yapılsın mı?` : `${name} kaptan yardımcılığı kaldırılsın mı?`}</AlertDialogTitle>
+        <AlertDialogDescription>
+          {promoting
+            ? "Kaptan yardımcısı maç oluşturabilir, davet gönderebilir ve katılma isteklerini yönetebilir. Kurucu ve kaptan yetkileri değişmez."
+            : "Oyuncu yeniden sıradan üye olur; kaptan yardımcısı yetkileri anında sona erer."}
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      {state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}
+      <AlertDialogFooter>
+        <AlertDialogCancel>Vazgeç</AlertDialogCancel>
+        {/* form points at the hidden form below so crewId/userId/role travel with
+            the submit. A formAction dispatch would not carry those fields. */}
+        <Button type="submit" form={`role-form-${crewId}-${targetUserId}`} variant={promoting ? "default" : "outline"} disabled={pending}>
+          {pending ? <LoaderCircle className="animate-spin" /> : <Shield />}{promoting ? "Yardımcı yap" : "Yetkiyi kaldır"}
+        </Button>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+    <form id={`role-form-${crewId}-${targetUserId}`} action={action} className="hidden">
+      <input type="hidden" name="crewId" value={crewId} />
+      <input type="hidden" name="userId" value={targetUserId} />
+      <input type="hidden" name="role" value={role} />
+    </form>
+  </AlertDialog>;
+}
+
+type RosterRole = "OWNER" | "CAPTAIN" | "CO_CAPTAIN" | "MEMBER";
+
+/**
+ * Per-row action menu on the crew roster (GÖREV 1): vote, promote/demote and
+ * kick all live behind one "…" button instead of three inline controls, which
+ * keeps a 30-man grid scannable.
+ *
+ * Every disabled/hidden item mirrors a server rule — self-voting, owner-only
+ * promotions, officer-only removals — so the menu offers nothing the server
+ * would refuse, and the dialogs re-check anyway.
+ */
+export function RosterMemberMenu({ crewId, member, viewerId, isManager, isOwner }: {
+  crewId: string;
+  member: {
+    userId: string;
+    name: string;
+    image: string | null;
+    role: RosterRole;
+    ovrRating: number;
+    isUnrated?: boolean;
+    /** The viewer's own previous vote in this crew, if any. */
+    viewerVote: number | null;
+  };
+  viewerId: string;
+  /** The viewer manages this crew (OWNER / CAPTAIN / CO_CAPTAIN). */
+  isManager: boolean;
+  /** Only the crew owner may grant or revoke the CO_CAPTAIN role. */
+  isOwner: boolean;
+}) {
+  const [voteOpen, setVoteOpen] = useState(false);
+  const [kickOpen, setKickOpen] = useState(false);
+  const [roleOpen, setRoleOpen] = useState(false);
+  const [nextRole, setNextRole] = useState<"MEMBER" | "CO_CAPTAIN">("CO_CAPTAIN");
+
+  const isSelf = member.userId === viewerId;
+  const canVote = !isSelf;
+  const canChangeRole = isOwner && !isSelf && (member.role === "MEMBER" || member.role === "CO_CAPTAIN");
+  const isOfficer = member.role === "CAPTAIN" || member.role === "CO_CAPTAIN";
+  // Mirrors kickCrewMember: managers remove members, but officers only fall to
+  // the OWNER; nobody is offered themselves or the owner at all.
+  const canKick = isManager && !isSelf && member.role !== "OWNER" && (!isOfficer || isOwner);
+  const showKick = isManager && !isSelf && member.role !== "OWNER";
+
+  if (!canVote && !canChangeRole && !showKick) return null;
+
+  return <>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button type="button" variant="ghost" size="icon" aria-label={`${member.name} için işlemler`} className="shrink-0 text-zinc-500 hover:text-emerald-300">
+          <Ellipsis />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-60">
+        {canVote && (
+          <DropdownMenuItem onSelect={() => setVoteOpen(true)}>
+            <ThumbsUp />Oy ver
+          </DropdownMenuItem>
+        )}
+        {canChangeRole && (
+          <DropdownMenuItem onSelect={() => { setNextRole(member.role === "MEMBER" ? "CO_CAPTAIN" : "MEMBER"); setRoleOpen(true); }}>
+            <Shield />{member.role === "MEMBER" ? "Kaptan yardımcısı yap" : "Kaptan yardımcılığını kaldır"}
+          </DropdownMenuItem>
+        )}
+        {showKick && (
+          <DropdownMenuItem disabled={!canKick} className="text-rose-300 focus:text-rose-200" onSelect={() => setKickOpen(true)}>
+            <Trash2 />Ekipten çıkar
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+    <VoteDialog
+      crewId={crewId}
+      targetUserId={member.userId}
+      name={member.name}
+      image={member.image}
+      currentOvr={member.ovrRating}
+      existingVote={member.viewerVote}
+      open={voteOpen}
+      onOpenChange={setVoteOpen}
+    />
+    {showKick && <KickDialog crewId={crewId} targetUserId={member.userId} name={member.name} open={kickOpen} onOpenChange={setKickOpen} />}
+    {canChangeRole && <RoleDialog crewId={crewId} targetUserId={member.userId} name={member.name} role={nextRole} open={roleOpen} onOpenChange={setRoleOpen} />}
+  </>;
 }
 
 export function CreateCrewForm() {

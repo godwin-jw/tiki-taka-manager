@@ -91,6 +91,18 @@ export async function ratePlayer(db: PrismaClient, raterId: string, targetId: un
     const profile = profiles[0];
     if (!profile) throw new ValidationError("Oyuncu bulunamadı.");
     if (profile.userId === raterId) throw new ValidationError("Kendini değerlendiremezsin.");
+    // Cross-crew ratings are refused: an attribute verdict, like a peer OVR vote,
+    // only means something inside a crew the rater and the target actually share.
+    // Without this, a player's published OVR could be steered by strangers from
+    // unrelated crews.
+    const [raterCrews, targetCrews] = await Promise.all([
+      tx.crewMember.findMany({ where: { userId: raterId }, select: { crewId: true } }),
+      tx.crewMember.findMany({ where: { userId: profile.userId }, select: { crewId: true } }),
+    ]);
+    const raterCrewIds = new Set(raterCrews.map((row) => row.crewId));
+    if (!targetCrews.some((row) => raterCrewIds.has(row.crewId))) {
+      throw new ValidationError("Yalnızca aynı ekibin üyeleri birbirini değerlendirebilir.");
+    }
     await tx.playerRating.upsert({
       where: { raterId_playerProfileId: { raterId, playerProfileId } },
       create: { raterId, playerProfileId, ...scores }, update: scores,

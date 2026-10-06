@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { snakeDraft, type DraftPlayer, type RosterPlayer } from "@/lib/football";
 import { parseLineup } from "@/lib/validation";
-import { loadCrewPool, saveMatch } from "@/app/actions/global-match";
+import { saveMatch } from "@/app/actions/global-match";
 import { cn } from "@/lib/utils";
 
 /**
@@ -40,16 +40,19 @@ function TeamNameField({ id, label, value, onChange, disabled, placeholder, tone
   </div>;
 }
 
-export function MatchBuilder({ requestId, crews, globalRoster }: {
+export function MatchBuilder({ requestId, crewId, crewName, crewRoster }: {
   requestId: string;
-  /** Crews the captain belongs to; the server rejects any other crewId anyway. */
-  crews: Array<{ id: string; name: string }>;
-  /** The platform-wide pool, kept so clearing the crew scope can restore it. */
-  globalRoster: RosterPlayer[];
+  /**
+   * The active crew the match belongs to. The server does not trust this prop:
+   * saveMatch re-reads the crew from the activeCrewId cookie and re-validates
+   * membership, so a crafted value can never widen the scope.
+   */
+  crewId: string;
+  crewName: string;
+  /** The active crew's roster — the only pool this builder offers. */
+  crewRoster: RosterPlayer[];
 }) {
   const { players, selectedIds, capacity, setCapacity, toggle, clear, setPlayers } = useRoster();
-  const [crewId, setCrewId] = useState("");
-  const [poolState, poolAction, poolPending] = useActionState(loadCrewPool, {});
   const [draft, setDraft] = useState<DraftPlayer[]>([]);
   const [draftSelection, setDraftSelection] = useState("");
   const [error, setError] = useState("");
@@ -59,24 +62,16 @@ export function MatchBuilder({ requestId, crews, globalRoster }: {
   const [state, action, pending] = useActionState(saveMatch, {});
   const selectionKey = [...selectedIds].sort().join(",");
   const validDraft = draft.length > 0 && draftSelection === selectionKey;
-  // Scope switch: pick a crew and the pool becomes exactly that crew's members;
-  // clear it and the global pool returns. The first load is skipped because the
-  // context already starts with the global roster, which the ref records without
-  // a render-phase state update. Draft resets belong to the select's onChange
-  // (a user event), not this effect, per react-hooks/set-state-in-effect.
+  // Matches are crew-only, so the pool is always the active crew's roster. The
+  // context starts with the platform-wide roster from the layout; this one-shot
+  // effect swaps it for the crew roster on mount. The ref guard keeps a rerun
+  // effect from resetting a selection the user already made.
   const loadedCrewRef = useRef("");
   useEffect(() => {
     if (loadedCrewRef.current === crewId) return;
     loadedCrewRef.current = crewId;
-    if (!crewId) { setPlayers(globalRoster); return; }
-    const form = new FormData();
-    form.set("crewId", crewId);
-    poolAction(form);
-  }, [crewId]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (!poolState.results) return;
-    setPlayers(poolState.results as typeof globalRoster);
-  }, [poolState.results]); // eslint-disable-line react-hooks/exhaustive-deps
+    setPlayers(crewRoster);
+  }, [crewId, crewRoster, setPlayers]);
   let lineupError = "";
   if (validDraft) { try { parseLineup(draft); } catch (error) { lineupError = error instanceof Error ? error.message : "Kadroyu kontrol et."; } }
   function generate() {
@@ -94,6 +89,6 @@ export function MatchBuilder({ requestId, crews, globalRoster }: {
       {selectedIds.length > 0 && missingKeeper && <p className="text-xs text-amber-200">İki kaleci seçilmedi. Takımlar kurulabilir; eksik kaleci mevkisini taktik tahtasında atayabilirsin.</p>}
     </section>
     {draft.length > 0 && !validDraft && <p role="status" className="rounded-xl border border-amber-400/20 p-4 text-sm text-amber-200">Oyuncu seçimi değişti. Takımları yeniden dengele.</p>}
-    {validDraft && <><section className="glass space-y-4 p-6"><div className="flex flex-wrap items-center gap-2"><p className="eyebrow">TAKIM İSİMLERİ</p><span className="text-[10px] text-zinc-500">İsteğe bağlı · boş bırakırsan A Takımı / B Takımı kullanılır</span></div><div className="grid gap-3 sm:grid-cols-2"><TeamNameField id="team-a" label="A takımı" value={teamAName} onChange={setTeamAName} disabled={pending} placeholder="A Takımı" tone="emerald" /><TeamNameField id="team-b" label="B takımı" value={teamBName} onChange={setTeamBName} disabled={pending} placeholder="B Takımı" tone="sky" /></div></section>{crews.length > 0 && <section className="glass space-y-3 p-6"><p className="eyebrow">MAÇIN KAPSAMI</p><div className="space-y-2"><label htmlFor="match-crew" className="text-sm font-medium">Ekip</label><select id="match-crew" name="crewPicker" value={crewId} onChange={event => { setCrewId(event.target.value); setDraft([]); setDraftSelection(""); }} disabled={pending || poolPending} className="field-select"><option value="">Global maç (tüm kulüp)</option>{crews.map(crew => <option key={crew.id} value={crew.id}>{crew.name}</option>)}</select><p className="text-xs text-zinc-500">{crewId ? "Bu maç yalnızca seçili ekibin arşivinde görünür ve kadro o ekibin üyeleriyle sınırlıdır." : "Global maçlar kulüp merkezinde listelenir."}</p></div></section>}<TacticalPitch players={draft} onChange={pending ? undefined : setDraft} teamAName={teamAName.trim() || "A Takımı"} teamBName={teamBName.trim() || "B Takımı"} /><form action={action} className="glass space-y-4 p-6"><input type="hidden" name="requestId" value={requestId} /><input type="hidden" name="lineup" value={JSON.stringify(draft.map(({ id, team, position }) => ({ id, team, position })))} /><input type="hidden" name="teamAName" value={teamAName} /><input type="hidden" name="crewId" value={crewId} /><input type="hidden" name="teamBName" value={teamBName} /><input type="hidden" name="date" value={date && Number.isFinite(new Date(date).getTime()) ? new Date(date).toISOString() : ""} /><div className="flex flex-wrap items-end justify-between gap-4"><div className="space-y-2"><Label htmlFor="match-date">Maç tarihi ve saati (yerel saat)</Label><Input id="match-date" type="datetime-local" required value={date} onChange={e => setDate(e.target.value)} disabled={pending} /></div><Button type="submit" disabled={pending || Boolean(lineupError)}>{pending ? <LoaderCircle className="animate-spin" /> : <Check />}{pending ? "Kaydediliyor…" : "Kadroyu onayla ve maçı oluştur"}</Button></div>{lineupError && <p role="alert" className="text-sm text-amber-200">{lineupError}</p>}{state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}<p className="text-xs text-zinc-500">OVR değerleri kayıtta sunucudan alınır. Takımlardaki oyuncu sayıları eşit olmalıdır.</p></form></>}
+    {validDraft && <><section className="glass space-y-4 p-6"><div className="flex flex-wrap items-center gap-2"><p className="eyebrow">TAKIM İSİMLERİ</p><span className="text-[10px] text-zinc-500">İsteğe bağlı · boş bırakırsan A Takımı / B Takımı kullanılır</span></div><div className="grid gap-3 sm:grid-cols-2"><TeamNameField id="team-a" label="A takımı" value={teamAName} onChange={setTeamAName} disabled={pending} placeholder="A Takımı" tone="emerald" /><TeamNameField id="team-b" label="B takımı" value={teamBName} onChange={setTeamBName} disabled={pending} placeholder="B Takımı" tone="sky" /></div></section><section className="glass flex flex-wrap items-center justify-between gap-3 p-5"><div className="flex items-center gap-2 text-sm text-zinc-300"><Users className="size-4 text-emerald-400" />Maç <strong className="text-emerald-300">{crewName}</strong> ekibi için oluşturuluyor.</div><span className="text-[10px] text-zinc-500">Kadro yalnızca bu ekibin üyeleriyle sınırlıdır. Ekip değiştirmek için başlıktaki ekip seçicisini kullan.</span></section><TacticalPitch players={draft} onChange={pending ? undefined : setDraft} teamAName={teamAName.trim() || "A Takımı"} teamBName={teamBName.trim() || "B Takımı"} /><form action={action} className="glass space-y-4 p-6"><input type="hidden" name="requestId" value={requestId} /><input type="hidden" name="lineup" value={JSON.stringify(draft.map(({ id, team, position }) => ({ id, team, position })))} /><input type="hidden" name="teamAName" value={teamAName} /><input type="hidden" name="teamBName" value={teamBName} /><input type="hidden" name="date" value={date && Number.isFinite(new Date(date).getTime()) ? new Date(date).toISOString() : ""} /><div className="flex flex-wrap items-end justify-between gap-4"><div className="space-y-2"><Label htmlFor="match-date">Maç tarihi ve saati (yerel saat)</Label><Input id="match-date" type="datetime-local" required value={date} onChange={e => setDate(e.target.value)} disabled={pending} /></div><Button type="submit" disabled={pending || Boolean(lineupError)}>{pending ? <LoaderCircle className="animate-spin" /> : <Check />}{pending ? "Kaydediliyor…" : "Kadroyu onayla ve maçı oluştur"}</Button></div>{lineupError && <p role="alert" className="text-sm text-amber-200">{lineupError}</p>}{state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}<p className="text-xs text-zinc-500">OVR değerleri kayıtta sunucudan alınır. Takımlardaki oyuncu sayıları eşit olmalıdır.</p></form></>}
   </div>;
 }

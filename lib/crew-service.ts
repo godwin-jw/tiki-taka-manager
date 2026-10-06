@@ -242,6 +242,35 @@ export async function rejectCrewRequest(userId: string, requestId: string) {
   });
 }
 
+/**
+ * Grants or revokes the CO_CAPTAIN ("kaptan yardımcısı") role.
+ *
+ * Deliberately narrow, mirroring kickCrewMember's rules:
+ *  - only the crew's OWNER may change roles; captains (and co-captains) cannot
+ *    promote anybody, because the role is an officer rank, not a roster tool;
+ *  - nobody may change their own role (the OWNER check already excludes them,
+ *    but the explicit guard keeps the intent obvious);
+ *  - only the MEMBER <-> CO_CAPTAIN transition is allowed. CAPTAIN and OWNER
+ *    are never demoted through this path, so a crew always keeps someone in
+ *    charge and the owner can never lock themselves out;
+ *  - the target must actually be a member of this crew.
+ */
+export async function setCrewMemberRole(actorId: string, crewId: string, targetUserId: string, role: "MEMBER" | "CO_CAPTAIN") {
+  return prisma.$transaction(async (tx) => {
+    const actor = await tx.crewMember.findUnique({ where: { crewId_userId: { crewId, userId: actorId } }, select: { role: true } });
+    if (actor?.role !== "OWNER") throw new CrewError("Yalnızca kurucu kaptan yardımcısı atayabilir.");
+    if (actorId === targetUserId) throw new CrewError("Kendi rolünü değiştiremezsin.");
+
+    const target = await tx.crewMember.findUnique({ where: { crewId_userId: { crewId, userId: targetUserId } }, select: { id: true, role: true } });
+    if (!target) throw new CrewError("Bu oyuncu bu ekibin üyesi değil.");
+    if (target.role !== "MEMBER" && target.role !== "CO_CAPTAIN") throw new CrewError("Bu üyenin rolü değiştirilemez.");
+    if (target.role === role) throw new CrewError(role === "CO_CAPTAIN" ? "Bu oyuncu zaten kaptan yardımcısı." : "Bu oyuncu zaten kaptan yardımcısı değil.");
+
+    await tx.crewMember.update({ where: { id: target.id }, data: { role } });
+    return { crewId, userId: targetUserId, role };
+  });
+}
+
 export async function leaveCrew(userId: string, crewId: string) {
   const membership = await prisma.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { id: true, role: true } });
   if (!membership) throw new CrewError("Bu ekibin üyesi değilsin.");

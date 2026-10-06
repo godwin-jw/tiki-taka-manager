@@ -11,8 +11,9 @@ export class CrewError extends Error {}
  *  - the actor must hold OWNER or CAPTAIN in this crew;
  *  - nobody may remove themselves (leaveCrew applies its own OWNER rule);
  *  - the crew's OWNER can never be removed, not even by another captain;
- *  - a captain cannot remove a fellow captain; the owner may, so a crew can never
- *    end up with a captain nobody can remove.
+ *  - captains and co-captains are officers: only the OWNER may remove one, so a
+ *    captain can never eject a CO_CAPTAIN either. The owner may remove any
+ *    officer, so a crew can never end up with a captain nobody can remove.
  *
  * Deleting the CrewMember row is the whole effect. The account and every
  * PlayerSeasonStat / MatchPlayer row survive: kicking someone must never rewrite
@@ -30,7 +31,7 @@ export async function kickCrewMember(db: PrismaClient, actorId: string, crewId: 
     const target = await tx.crewMember.findUnique({ where: { crewId_userId: { crewId, userId: targetUserId } }, select: { id: true, role: true } });
     if (!target) throw new CrewError("Bu oyuncu bu ekibin üyesi değil.");
     if (target.role === "OWNER") throw new CrewError("Ekip sahibi ekipten çıkarılamaz.");
-    if (target.role === "CAPTAIN" && actor?.role !== "OWNER") throw new CrewError("Yalnızca kurucu bir kaptanı çıkarabilir.");
+    if ((target.role === "CAPTAIN" || target.role === "CO_CAPTAIN") && actor?.role !== "OWNER") throw new CrewError("Yalnızca kurucu bir kaptanı veya kaptan yardımcısını çıkarabilir.");
 
     await tx.crewMember.delete({ where: { id: target.id } });
     // Votes cast by or for this player in this crew stop applying immediately.

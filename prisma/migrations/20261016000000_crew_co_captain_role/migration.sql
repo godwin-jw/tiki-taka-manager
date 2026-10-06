@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "CrewRole" ADD VALUE 'CO_CAPTAIN';

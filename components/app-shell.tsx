@@ -11,6 +11,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTr
 import { PlayerAvatar } from "@/components/player-avatar";
 import { OvrBadge } from "@/components/ovr-badge";
 import { RosterProvider, useRoster } from "@/components/roster-context";
+import { ActiveCrewSync, WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { positions, type RosterPlayer } from "@/lib/football";
 import { cn } from "@/lib/utils";
 
@@ -60,15 +61,27 @@ function RosterSidebar({ selectable, onNavigate }: { selectable: boolean; onNavi
   </div>;
 }
 
-export function AppShell({ user, players, children }: { user: ShellUser | null; players: RosterPlayer[]; children: React.ReactNode }) {
+export function AppShell({ user, players, crews, activeCrewId, needsSync, children }: {
+  user: ShellUser | null;
+  players: RosterPlayer[];
+  /** Crews the viewer belongs to; powers the workspace switcher in the header. */
+  crews: Array<{ id: string; name: string }>;
+  /** Resolved active crew (validated cookie or fallback). */
+  activeCrewId: string | null;
+  /** True when the cookie was missing/stale and the fallback still needs persisting. */
+  needsSync: boolean;
+  children: React.ReactNode;
+}) {
   const [open, setOpen] = useState(false);
   return <RosterProvider players={players}><div className="min-h-screen bg-[radial-gradient(ellipse_at_top_right,#064e3b22,transparent_45%)]">
+    {/* One-shot cookie writer for first visits / stale workspaces. */}
+    {user && <ActiveCrewSync activeCrewId={activeCrewId} needsSync={needsSync} />}
     <a href="#main-content" className="sr-only z-[100] rounded bg-emerald-300 p-3 text-black focus:not-sr-only focus:fixed focus:top-2 focus:left-2">İçeriğe geç</a>
     {user && <aside className="fixed inset-y-0 left-0 z-30 hidden w-72 border-r border-white/10 bg-zinc-950/80 backdrop-blur-xl lg:block"><RosterSidebar selectable={user.role === "CAPTAIN"} /></aside>}
     <div className={cn(user && "lg:pl-72")}>
       <header className="sticky top-0 z-20 flex h-20 items-center justify-between gap-3 border-b border-white/10 bg-zinc-950/70 px-4 backdrop-blur-xl sm:px-8">
         <div className="flex items-center gap-3">{user ? <Sheet open={open} onOpenChange={setOpen}><SheetTrigger asChild><Button variant="outline" size="icon" className="lg:hidden" aria-label="Oyuncu havuzunu aç"><Menu /></Button></SheetTrigger><SheetContent side="left" className="w-[min(90vw,320px)] gap-0 p-0"><SheetHeader className="sr-only"><SheetTitle>Oyuncu havuzu ve menü</SheetTitle><SheetDescription>Menüde gezin veya maçın için oyuncu seç.</SheetDescription></SheetHeader><RosterSidebar selectable={user.role === "CAPTAIN"} onNavigate={() => setOpen(false)} /></SheetContent></Sheet> : <Trophy className="size-6 text-emerald-400" />}<div><p className="text-sm font-semibold">{user ? "Kulüp Merkezi" : "TIKI-TAKA MANAGER"}</p><p className="hidden text-[10px] tracking-widest text-zinc-500 sm:block">YOUR GAME. YOUR LEGACY.</p></div></div>
-        <div className="flex items-center gap-3">{user ? <><span className="hidden items-center gap-2 text-xs text-zinc-400 md:flex"><span className="size-1.5 rounded-full bg-emerald-400" />{user.role === "CAPTAIN" ? "Kaptan hesabı" : "Oyuncu hesabı"}</span><Button asChild size="sm" className="hidden sm:inline-flex"><Link href="/yeni-mac"><Plus />Maç oluştur</Link></Button><Link href="/profil" aria-label="Profilime git"><PlayerAvatar name={user.name || "Oyuncu"} image={user.image} /></Link><AuthButton logout /></> : <AuthButton />}</div>
+        <div className="flex items-center gap-3">{user ? <><span className="hidden items-center gap-2 text-xs text-zinc-400 md:flex"><span className="size-1.5 rounded-full bg-emerald-400" />{user.role === "CAPTAIN" ? "Kaptan hesabı" : "Oyuncu hesabı"}</span>{crews.length > 0 && <WorkspaceSwitcher crews={crews} activeCrewId={activeCrewId} />}<Button asChild size="sm" className="hidden sm:inline-flex"><Link href="/yeni-mac"><Plus />Maç oluştur</Link></Button><Link href="/profil" aria-label="Profilime git"><PlayerAvatar name={user.name || "Oyuncu"} image={user.image} /></Link><AuthButton logout /></> : <AuthButton />}</div>
       </header>
       <main id="main-content" className="mx-auto max-w-[1600px] p-4 sm:p-8 lg:p-10">{children}</main>
       <footer className="flex justify-between border-t border-white/5 px-8 py-6 text-[10px] tracking-wider text-zinc-600"><span>TIKI-TAKA MANAGER</span><span className="flex items-center gap-2"><Users className="size-3" /> OYUNUN BİR PARÇASI OL.</span></footer>

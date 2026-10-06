@@ -32,10 +32,12 @@ enum Team {
   B
 }
 
-// Membership role inside a crew.
+// Membership role inside a crew. CO_CAPTAIN is a deputy captain: same pitch-side
+// powers as CAPTAIN, but never crew ownership transfers or owner removal.
 enum CrewRole {
   OWNER
   CAPTAIN
+  CO_CAPTAIN
   MEMBER
 }
 

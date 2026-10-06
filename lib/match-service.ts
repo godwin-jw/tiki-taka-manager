@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { optionalCrewId, parseLineup, parseReport, teamName, text, ValidationError } from "./validation.ts";
+import { canManageCrew } from "./football.ts";
 import { DEFAULT_CREW_OVR, getCrewOvrByProfile } from "./crew-ovr.ts";
 
 // Not a Server Action: callers supply the authenticated server-side user ID.
@@ -13,15 +14,24 @@ export async function createGlobalMatch(db: PrismaClient, userId: string, input:
   const nameA = teamName(input.teamAName, "A");
   const nameB = teamName(input.teamBName, "B");
   if (nameA === nameB) throw new ValidationError("Takım adları birbirinden farklı olmalıdır.");
-  // A match belongs to the crew whose members play it. An empty value means a
-  // global match, which stays visible to the whole platform.
+  // A match normally belongs to the crew whose members play it (saveMatch always
+  // resolves the scope from the activeCrewId cookie). An empty value is only
+  // tolerated for legacy/global matches, which still require a platform captain.
   const crewId = optionalCrewId(input.crewId);
   // New matches always count towards the live season.
   const activeSeasonId = await db.season.findFirst({ where: { isActive: true }, select: { id: true } }).then(row => row?.id ?? null);
   const user = await db.user.findUnique({ where: { id: userId }, select: { role: true } });
-  if (user?.role !== "CAPTAIN") throw new ValidationError("Maç oluşturmak için kaptan olmalısın.");
-  if (crewId && !(await db.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { id: true } }))) {
-    throw new ValidationError("Yalnızca üye olduğun ekip için maç oluşturabilirsin.");
+  if (crewId) {
+    const membership = await db.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { role: true } });
+    if (!membership) throw new ValidationError("Yalnızca üye olduğun ekip için maç oluşturabilirsin.");
+    // Pitch-side authority: the platform captain flag OR a crew officer rank
+    // (OWNER / CAPTAIN / CO_CAPTAIN) inside the target crew. The UI shows the
+    // same rule on /yeni-mac, but this is the enforcement point.
+    if (user?.role !== "CAPTAIN" && !canManageCrew(membership.role)) {
+      throw new ValidationError("Maç oluşturmak için kaptan olmalısın.");
+    }
+  } else if (user?.role !== "CAPTAIN") {
+    throw new ValidationError("Maç oluşturmak için kaptan olmalısın.");
   }
   const existing = await db.match.findUnique({ where: { id }, select: { createdById: true } });
   if (existing) {
@@ -70,10 +80,19 @@ export async function createGlobalMatch(db: PrismaClient, userId: string, input:
 export async function reportGlobalMatch(db: PrismaClient, userId: string, matchId: string, input: unknown) {
   const report = parseReport(input);
   return db.$transaction(async tx => {
-    const user = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
-    if (user?.role !== "CAPTAIN") throw new ValidationError("Raporlama için kaptan yetkisi gerekiyor.");
     const match = await tx.match.findUnique({ where: { id: matchId }, include: { players: true } });
-    if (!match || match.createdById !== userId || match.groupId !== null) throw new ValidationError("Bu maçı raporlama yetkin yok.");
+    if (!match || match.groupId !== null) throw new ValidationError("Bu maçı raporlama yetkin yok.");
+    if (match.createdById !== userId) throw new ValidationError("Bu maçı raporlama yetkin yok.");
+    // Crew match: the creator must still be an active member of the crew, which
+    // covers officers (CO_CAPTAIN) as well as platform captains. Legacy global
+    // matches keep the stricter platform-captain gate.
+    if (match.crewId) {
+      const membership = await tx.crewMember.findUnique({ where: { crewId_userId: { crewId: match.crewId, userId } }, select: { id: true } });
+      if (!membership) throw new ValidationError("Bu ekibin üyesi değilsin.");
+    } else {
+      const user = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
+      if (user?.role !== "CAPTAIN") throw new ValidationError("Raporlama için kaptan yetkisi gerekiyor.");
+    }
     if (match.status !== "ONGOING" || match.reportedAt) throw new ValidationError("Bu maç zaten raporlanmış veya kapatılmış.");
     if (match.players.length !== report.players.length || report.players.some(p => !match.players.some(m => m.playerProfileId === p.id))) throw new ValidationError("Rapor yalnızca kayıtlı maç kadrosunu içerebilir.");
     for (const team of ["A", "B"] as const) {
@@ -127,16 +146,24 @@ export async function reportGlobalMatch(db: PrismaClient, userId: string, matchI
 export async function deleteGlobalMatch(db: PrismaClient, userId: string, matchId: string) {
   if (!matchId) throw new ValidationError("Maç bulunamadı.");
   return db.$transaction(async (tx) => {
-    const user = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
-    if (user?.role !== "CAPTAIN") throw new ValidationError("Maç silmek için kaptan yetkisi gerekiyor.");
     const match = await tx.match.findUnique({
       where: { id: matchId },
-      select: { id: true, createdById: true, groupId: true, status: true, seasonId: true, reportedAt: true },
+      select: { id: true, createdById: true, groupId: true, crewId: true, status: true, seasonId: true, reportedAt: true },
     });
     if (!match) throw new ValidationError("Bu maç zaten silinmiş.");
     if (match.groupId !== null) throw new ValidationError("Grup maçları bu ekrandan silinemez.");
     // Ownership is checked server-side; hiding the button in the UI is not enough.
     if (match.createdById !== userId) throw new ValidationError("Yalnızca bu maçı kuran kaptan silebilir.");
+    // Crew match: still being a member of that crew is enough for the officer who
+    // created it (covers CO_CAPTAIN). Legacy global matches keep the platform
+    // captain gate they were created under.
+    if (match.crewId) {
+      const membership = await tx.crewMember.findUnique({ where: { crewId_userId: { crewId: match.crewId, userId } }, select: { id: true } });
+      if (!membership) throw new ValidationError("Bu ekibin üyesi değilsin.");
+    } else {
+      const user = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
+      if (user?.role !== "CAPTAIN") throw new ValidationError("Maç silmek için kaptan yetkisi gerekiyor.");
+    }
 
     // A match only ever moved the counters once its report was accepted.
     if (match.reportedAt !== null) {

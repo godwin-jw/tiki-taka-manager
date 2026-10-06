@@ -6,7 +6,7 @@ import { requireUser } from "@/lib/auth";
 import { getCrewDetail } from "@/lib/crew-service";
 import { prisma } from "@/lib/prisma";
 import { listIncomingInvitations } from "@/lib/invitation-service";
-import { BackToCrewsLink, CancelRequestButton, CrewInviteLink, CrewRequestsPanel, IncomingInvitationsPanel, InvitePlayerDialog, JoinCrewForm, JoinSuccessToast, KickMemberButton, LeaveCrewButton, PeerVoteButton } from "@/components/crew-forms";
+import { BackToCrewsLink, CancelRequestButton, CrewInviteLink, CrewRequestsPanel, IncomingInvitationsPanel, InvitePlayerDialog, JoinCrewForm, JoinSuccessToast, LeaveCrewButton, RosterMemberMenu } from "@/components/crew-forms";
 import { PlayerAvatar } from "@/components/player-avatar";
 import { OvrBadge } from "@/components/ovr-badge";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +14,7 @@ import { positionLabels, sortByStats } from "@/lib/football";
 
 export const metadata: Metadata = { title: "Ekip" };
 
-const roleLabels = { OWNER: "Kurucu", CAPTAIN: "Kaptan", MEMBER: "Üye" } as const;
+const roleLabels = { OWNER: "Kurucu", CAPTAIN: "Kaptan", CO_CAPTAIN: "Kaptan Yardımcısı", MEMBER: "Üye" } as const;
 
 function Leaderboard({ title, icon: Icon, rows, metric }: {
   title: string;
@@ -102,31 +102,23 @@ export default async function CrewPage({ params, searchParams }: { params: Promi
                 </div>
                 <OvrBadge value={member.ovrRating} isUnrated={member.isUnrated} voteCount={member.voteCount} />
               </Link>
-              {/* Self-voting is blocked server-side, so the button is simply not offered. */}
-              {member.userId !== user.id && (
-                <PeerVoteButton
-                  crewId={crew.id}
-                  targetUserId={member.userId}
-                  name={member.name}
-                  image={member.image}
-                  currentOvr={member.ovrRating}
-                  existingVote={member.viewerVote}
-                />
-              )}
-              {/* Mirrors the server rules: managers only, never the owner, never
-                  yourself, and a captain may not remove a fellow captain. */}
-              {crew.isManager && (
-                <KickMemberButton
-                  crewId={crew.id}
-                  targetUserId={member.userId}
-                  name={member.name}
-                  disabled={
-                    member.userId === user.id ||
-                    member.role === "OWNER" ||
-                    (member.role === "CAPTAIN" && !crew.isOwner)
-                  }
-                />
-              )}
+              {/* One menu per row: vote / promote / kick, each gated by the same
+                  rules the server enforces (GÖREV 1 + GÖREV 4). */}
+              <RosterMemberMenu
+                crewId={crew.id}
+                member={{
+                  userId: member.userId,
+                  name: member.name,
+                  image: member.image,
+                  role: member.role,
+                  ovrRating: member.ovrRating,
+                  isUnrated: member.isUnrated,
+                  viewerVote: member.viewerVote,
+                }}
+                viewerId={user.id}
+                isManager={crew.isManager}
+                isOwner={crew.isOwner}
+              />
             </li>
           ))}</ul>
         </section>

@@ -60,9 +60,10 @@ export function teamName(value: unknown, side: "A" | "B"): string {
 /**
  * Normalises an optional crew scope.
  *
- * Absent, null, "" and whitespace all mean "no crew", which is what the match
- * builder sends for a global match. Any other value must be a real id, so a
- * crafted form cannot smuggle an arbitrary string into the crewId column.
+ * Absent, null, "" and whitespace all mean "no crew" (a legacy global match);
+ * every new match passes the active crew resolved from the cookie. Any other
+ * value must be a real id, so a crafted value cannot smuggle an arbitrary
+ * string into the crewId column.
  */
 export function optionalCrewId(value: unknown): string | null {
   if (value === null || value === undefined) return null;

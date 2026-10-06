@@ -13,6 +13,7 @@ import {
   leaveCrew,
   rejectCrewRequest,
   requestToJoin,
+  setCrewMemberRole,
 } from "@/lib/crew-service";
 import { ValidationError, parseCrewName, parseCrewRequestMessage, text } from "@/lib/validation";
 import type { ActionState } from "@/lib/football";
@@ -112,6 +113,28 @@ export async function leaveCrewAction(_previous: ActionState, form: FormData): P
     revalidatePath(crewPath(crewId));
     revalidatePath("/ekipler");
     return { success: "Ekipten ayrıldın." };
+  } catch (error) {
+    return failure(error);
+  }
+}
+
+/**
+ * Grants or revokes the CO_CAPTAIN role on a member.
+ *
+ * The role value is restricted to the two allowed transitions before anything
+ * reaches the service; setCrewMemberRole re-checks that the session user is the
+ * crew's OWNER, so a hand-crafted request cannot promote anybody.
+ */
+export async function setCrewRoleAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+  const user = await requireUser();
+  try {
+    const crewId = text(form.get("crewId"), "Ekip", 1, 100);
+    const targetUserId = text(form.get("userId"), "Oyuncu", 1, 100);
+    const role = text(form.get("role"), "Rol", 1, 20);
+    if (role !== "MEMBER" && role !== "CO_CAPTAIN") throw new ValidationError("Geçersiz rol.");
+    await setCrewMemberRole(user.id, crewId, targetUserId, role);
+    revalidatePath(crewPath(crewId));
+    return { success: role === "CO_CAPTAIN" ? "Oyuncu kaptan yardımcısı yapıldı." : "Kaptan yardımcılığı kaldırıldı." };
   } catch (error) {
     return failure(error);
   }

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { CalendarRange, Crown, LockKeyhole, Medal, ShieldCheck, Swords, Target, Trophy } from "lucide-react";
+import { CalendarDays, CalendarRange, Crown, LockKeyhole, Medal, ShieldCheck, Swords, Target, Trophy } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { listSeasons } from "@/lib/season-data";
@@ -47,12 +47,23 @@ export default async function PublicProfilePage({ params, searchParams }: { para
   if (!player?.playerProfile) notFound();
   const profile = player.playerProfile;
 
-  const [seasons, summary, timeline] = await Promise.all([
+  const [seasons, summary, timeline, recentMatches] = await Promise.all([
     listSeasons(),
     getRatingSummary(profile.id),
     prisma.playerSeasonStat.findMany({
       where: { playerProfileId: profile.id },
       select: { seasonId: true, ovrRating: true, goals: true, assists: true, matchesPlayed: true, motmCount: true },
+    }),
+    // GÖREV 5: per-match goal/assist line for the "Son Maçlar" table. Only
+    // completed, non-group matches — the same archive the career counters use.
+    prisma.matchPlayer.findMany({
+      where: { playerProfileId: profile.id, match: { status: "COMPLETED", groupId: null } },
+      orderBy: [{ match: { date: "desc" } }, { matchId: "desc" }],
+      take: 10,
+      select: {
+        goals: true, assists: true, isMotm: true,
+        match: { select: { id: true, date: true, teamAName: true, teamBName: true, teamAScore: true, teamBScore: true } },
+      },
     }),
   ]);
 
@@ -132,6 +143,35 @@ export default async function PublicProfilePage({ params, searchParams }: { para
                 </div>
               ))}</dl>}
           {selectedStat && <p className="mt-4 text-xs text-zinc-500">{selectedStat.matchesPlayed} maç oynandı · genel OVR {selectedStat.ovrRating.toFixed(1)}</p>}
+        </CardContent>
+      </Card>
+
+      {/* GÖREV 5: right-column match log — the same row links to the full report. */}
+      <Card className="glass gap-0 border-0 lg:col-span-12 xl:col-span-4">
+        <CardHeader className="px-6 pt-6">
+          <CardTitle className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2"><CalendarDays className="size-5 text-emerald-400" />Son maçlar</span>
+            <span className="text-[10px] tracking-widest text-zinc-500">GOL / ASİST</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="px-6 pb-6">
+          {recentMatches.length === 0
+            ? <p className="text-sm text-zinc-400">Henüz tamamlanmış maç yok.</p>
+            : <ul className="divide-y divide-white/5">{recentMatches.map(row => (
+                <li key={row.match.id}>
+                  <Link href={`/mac/${row.match.id}`} className="-mx-2 flex items-center gap-3 rounded-lg px-2 py-3 transition-colors hover:bg-white/5">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{row.match.teamAName} <span className="font-mono text-zinc-500">{row.match.teamAScore} : {row.match.teamBScore}</span> {row.match.teamBName}</p>
+                      <p className="text-[11px] text-zinc-500">{new Intl.DateTimeFormat("tr-TR", { day: "numeric", month: "short", timeZone: "Europe/Istanbul" }).format(row.match.date)}</p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2 font-mono text-xs">
+                      <span className="text-emerald-300">{row.goals}G</span>
+                      <span className="text-sky-300">{row.assists}A</span>
+                      {row.isMotm && <Trophy className="size-3.5 text-amber-300" aria-label="Maçın adamı" />}
+                    </div>
+                  </Link>
+                </li>
+              ))}</ul>}
         </CardContent>
       </Card>
 

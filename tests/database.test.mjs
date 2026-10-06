@@ -80,6 +80,10 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await db.$executeRaw`UPDATE "Crew" SET "inviteCode" = 'BCCB52FF' WHERE id = 'pre-invite'`;
     cpSync("prisma/migrations/20261015000000_repair_legacy_invite_codes", path.join(migrations, "20261015000000_repair_legacy_invite_codes"), { recursive: true });
     migrate();
+    // GÖREV 4: the CO_CAPTAIN officer rank is a pure enum extension and must
+    // upgrade cleanly on top of every earlier crew migration.
+    cpSync("prisma/migrations/20261016000000_crew_co_captain_role", path.join(migrations, "20261016000000_crew_co_captain_role"), { recursive: true });
+    migrate();
     const repaired = await db.crew.findUniqueOrThrow({ where: { id: "pre-invite" } });
     assert.notEqual(repaired.inviteCode, "BCCB52FF", "a hex code outside the alphabet must be replaced");
     assert.equal(normalizeInviteCode(repaired.inviteCode), repaired.inviteCode, "the repaired code must be redeemable");
@@ -170,6 +174,20 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await assert.rejects(createGlobalMatch(db, user.id, { ...input, requestId: randomUUID(), teamAName: "x".repeat(31) }));
 
 
+    // GÖREV 2: attribute ratings require a crew the rater and the target share,
+    // so the Voters crew (and every rater used below) is created before the first
+    // ratePlayer call. The peer-voting section reuses the same crew — and keeps
+    // legacy OUT of it so the cross-crew refusals there stay meaningful.
+    const crew = await db.crew.create({ data: { name: "Voters", ownerId: user.id, inviteCode: generateInviteCode() } });
+    await db.crewMember.create({ data: { crewId: crew.id, userId: user.id, role: "OWNER" } });
+    await db.crewMember.create({ data: { crewId: crew.id, userId: extras[0].id, role: "MEMBER" } });
+    await db.crewMember.create({ data: { crewId: crew.id, userId: extras[1].id, role: "MEMBER" } });
+    // legacy and `user` overlap in a second, tiny crew so legacy's own rating of
+    // the target below is legal without opening the Voters crew to them.
+    const bridgeCrew = await db.crew.create({ data: { name: "Bridge", ownerId: legacy.id, inviteCode: generateInviteCode() } });
+    await db.crewMember.create({ data: { crewId: bridgeCrew.id, userId: legacy.id, role: "OWNER" } });
+    await db.crewMember.create({ data: { crewId: bridgeCrew.id, userId: user.id, role: "MEMBER" } });
+
     const scores = n => ({ pace: n, shooting: n, passing: n, dribbling: n, defending: n, physical: n });
     await assert.rejects(ratePlayer(db, user.id, profile.id, scores(90)), /Kendini/);
     await assert.rejects(ratePlayer(db, "missing-user", profile.id, scores(90)), /oturumu/);
@@ -246,10 +264,8 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await assert.rejects(deleteGlobalMatch(db, user.id, globalId), /zaten silinmiş/);
 
     // --- crew peer voting ---------------------------------------------------
-    const crew = await db.crew.create({ data: { name: "Voters", ownerId: user.id, inviteCode: generateInviteCode() } });
-    await db.crewMember.create({ data: { crewId: crew.id, userId: user.id, role: "OWNER" } });
-    await db.crewMember.create({ data: { crewId: crew.id, userId: extras[0].id, role: "MEMBER" } });
-    await db.crewMember.create({ data: { crewId: crew.id, userId: extras[1].id, role: "MEMBER" } });
+    // The Voters crew and its members already exist (created before the rating
+    // section above, because attribute ratings also require a shared crew).
     const otherCrew = await db.crew.create({ data: { name: "Outsiders", ownerId: legacy.id, inviteCode: generateInviteCode() } });
     await db.crewMember.create({ data: { crewId: otherCrew.id, userId: legacy.id, role: "OWNER" } });
     await db.crewMember.create({ data: { crewId: otherCrew.id, userId: otherCaptain.id, role: "MEMBER" } });
@@ -261,6 +277,9 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await assert.rejects(castPeerVote(db, legacy.id, crew.id, extras[0].id, 90), /ekibin/);
     // A member cannot vote for someone outside their crew.
     await assert.rejects(castPeerVote(db, user.id, crew.id, legacy.id, 90), /ekibin/);
+    // GÖREV 2: attribute ratings follow the same boundary as peer votes —
+    // `otherCaptain` (Outsiders only) and `extras[0]` (Voters) share no crew.
+    await assert.rejects(ratePlayer(db, otherCaptain.id, votedProfile.id, scores(70)), /aynı ekibin üyeleri/);
     // An unknown voter session is rejected.
     await assert.rejects(castPeerVote(db, "ghost-user", crew.id, extras[0].id, 90), /oturumu/);
     // Out-of-range and malformed scores never reach the table.
@@ -447,6 +466,14 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     // The owner, however, may remove a captain.
     await kickCrewMember(db, kickOwner.id, kickCrew.id, rivalCaptain.id);
     assert.equal(await db.crewMember.count({ where: { crewId: kickCrew.id, userId: rivalCaptain.id } }), 0);
+
+    // GÖREV 4: CO_CAPTAIN is an officer for kicks too — a captain cannot remove
+    // one, only the owner can, and writing the value proves the migration landed.
+    const coCaptain = await db.user.create({ data: { email: `co-${randomUUID()}@test.dev`, name: "Kaptan Yardimcisi" } });
+    await db.crewMember.create({ data: { crewId: kickCrew.id, userId: coCaptain.id, role: "CO_CAPTAIN" } });
+    await assert.rejects(kickCrewMember(db, kickCaptain.id, kickCrew.id, coCaptain.id), /kurucu/);
+    await kickCrewMember(db, kickOwner.id, kickCrew.id, coCaptain.id);
+    assert.equal(await db.crewMember.count({ where: { crewId: kickCrew.id, userId: coCaptain.id } }), 0);
 
     // The captain kicks an ordinary member: membership goes, history stays.
     await kickCrewMember(db, kickCaptain.id, kickCrew.id, kickTarget.id);

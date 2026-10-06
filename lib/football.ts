@@ -86,10 +86,18 @@ export function snakeDraft(players: RosterPlayer[]): DraftPlayer[] {
 // and captain permissions are decided in exactly one place.
 // ---------------------------------------------------------------------------
 
-export type CrewRoleName = "OWNER" | "CAPTAIN" | "MEMBER";
+/**
+ * Hierarchy inside a crew: OWNER > CAPTAIN > CO_CAPTAIN > MEMBER.
+ *
+ * CO_CAPTAIN ("kaptan yardımcısı") carries the pitch-side powers of a captain
+ * (matches, invites, join requests, roster management) but never the owner's
+ * crown: only the OWNER may grant or revoke it, remove an officer, or change
+ * the crew's owner.
+ */
+export type CrewRoleName = "OWNER" | "CAPTAIN" | "CO_CAPTAIN" | "MEMBER";
 
-/** Roles allowed to review join requests and manage the roster. */
-export const CREW_MANAGERS: readonly CrewRoleName[] = ["OWNER", "CAPTAIN"];
+/** Roles allowed to review join requests, invite players and manage the roster. */
+export const CREW_MANAGERS: readonly CrewRoleName[] = ["OWNER", "CAPTAIN", "CO_CAPTAIN"];
 
 export function canManageCrew(role: CrewRoleName | null | undefined): boolean {
   return role !== null && role !== undefined && CREW_MANAGERS.includes(role);

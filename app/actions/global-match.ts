@@ -4,34 +4,21 @@ import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createGlobalMatch, deleteGlobalMatch, reportGlobalMatch } from "@/lib/match-service";
-import { getCrewRoster } from "@/lib/data";
-
-/**
- * Returns the crew-only player pool for the match builder.
- *
- * Picking a crew narrows the pool to that crew's members; leaving it empty keeps
- * the global pool. The crew id is not trusted here beyond the lookup: getCrewRoster
- * re-checks that the caller is a member, so a crafted crewId returns an empty list
- * instead of another crew's roster. createGlobalMatch enforces the same rule again
- * on save, so this action is a convenience layer, not the security boundary.
- */
-export async function loadCrewPool(_previous: ActionState, form: FormData): Promise<ActionState> {
-  await requireUser();
-  try {
-    const crewId = String(form.get("crewId") ?? "").trim();
-    if (!crewId) return { results: [] };
-    return { results: await getCrewRoster(crewId) };
-  } catch {
-    return { error: "Ekip oyuncu havuzu yüklenemedi." };
-  }
-}
+import { resolveActiveCrewId } from "@/lib/active-crew";
 import { jsonField, text, ValidationError } from "@/lib/validation";
 import type { ActionState } from "@/lib/football";
 
 export async function saveMatch(_previous: ActionState, form: FormData): Promise<ActionState> {
   const user = await requireUser();
   let id: string;
-  try { id = await createGlobalMatch(prisma, user.id, { requestId: form.get("requestId"), date: form.get("date"), lineup: jsonField(form, "lineup"), teamAName: form.get("teamAName"), teamBName: form.get("teamBName"), crewId: form.get("crewId") }); }
+  try {
+    // The scope never comes from the form: it is the active crew from the
+    // cookie, re-validated against the caller's own memberships. Matches are
+    // crew-only, so a missing/invalid workspace is a hard stop.
+    const crewId = await resolveActiveCrewId(user.id);
+    if (!crewId) throw new ValidationError("Maç kaydetmek için bir ekibe katılmalısın.");
+    id = await createGlobalMatch(prisma, user.id, { requestId: form.get("requestId"), date: form.get("date"), lineup: jsonField(form, "lineup"), teamAName: form.get("teamAName"), teamBName: form.get("teamBName"), crewId });
+  }
   catch (error) { return { error: error instanceof ValidationError ? error.message : "Maç kaydedilemedi. Lütfen tekrar deneyin." }; }
   revalidatePath("/", "layout");
   redirect(`/mac/${id}`);

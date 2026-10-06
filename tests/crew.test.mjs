@@ -12,10 +12,12 @@ const form = (entries) => {
 test("only owners and captains may manage a crew", () => {
   assert.equal(canManageCrew("OWNER"), true);
   assert.equal(canManageCrew("CAPTAIN"), true);
+  assert.equal(canManageCrew("CO_CAPTAIN"), true);
   assert.equal(canManageCrew("MEMBER"), false);
   assert.equal(canManageCrew(null), false);
   assert.equal(canManageCrew(undefined), false);
-  assert.deepEqual([...CREW_MANAGERS], ["OWNER", "CAPTAIN"]);
+  // CO_CAPTAIN sits between CAPTAIN and MEMBER: officers manage, members never do.
+  assert.deepEqual([...CREW_MANAGERS], ["OWNER", "CAPTAIN", "CO_CAPTAIN"]);
 });
 
 test("crew search ignores case and repeated whitespace", () => {
