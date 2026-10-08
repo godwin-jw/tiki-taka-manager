@@ -1,17 +1,21 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { ACTIVE_CREW_COOKIE } from "@/lib/active-crew";
 import {
   CrewError,
   approveCrewRequest,
   cancelCrewRequest,
   createCrew,
+  deleteCrewByOwner,
   kickCrewMember,
   leaveCrew,
   rejectCrewRequest,
+  renameCrewByOwner,
   requestToJoin,
   setCrewMemberRole,
 } from "@/lib/crew-service";
@@ -138,4 +142,56 @@ export async function setCrewRoleAction(_previous: ActionState, form: FormData):
   } catch (error) {
     return failure(error);
   }
+}
+
+/**
+ * Renames a crew. Only the crew's OWNER may do it.
+ *
+ * Called directly from a client component (not through a <form>), so the
+ * arguments are untrusted: both are validated again in renameCrewByOwner, and
+ * the ownership check runs there inside the transaction against the SESSION
+ * user - never against anything the client sends.
+ *
+ * The layout is revalidated because the crew name is rendered all over it (the
+ * workspace switcher in the header and the "Ekibim" menu in the sidebar).
+ */
+export async function renameCrew(crewId: string, newName: string): Promise<ActionState> {
+  const user = await requireUser();
+  try {
+    const result = await renameCrewByOwner(prisma, user.id, crewId, newName);
+    revalidatePath("/", "layout");
+    return { success: result.changed ? "Ekip adı güncellendi." : "Ekip adı zaten bu şekilde." };
+  } catch (error) {
+    return failure(error);
+  }
+}
+
+/**
+ * Permanently deletes a crew. Only the crew's OWNER may do it.
+ *
+ * `confirmName` is the name the user typed into the confirmation field. It is
+ * compared on the server against the real name, so skipping the UI (a hand
+ * crafted call) cannot skip the confirmation either.
+ *
+ * Active-crew cookie: when it points at the crew that was just deleted it is
+ * removed, so the next request falls back to a crew the user still belongs to
+ * (getActiveCrewContext re-validates the cookie against live memberships) or to
+ * "no workspace" - never to a crew that no longer exists. A cookie that points
+ * somewhere else is left alone. Other members' cookies need no cleanup: theirs
+ * stop validating the moment the memberships are gone.
+ *
+ * `redirect` throws by design and therefore runs outside the try/catch.
+ */
+export async function deleteCrew(crewId: string, confirmName: string): Promise<ActionState> {
+  const user = await requireUser();
+  try {
+    await deleteCrewByOwner(prisma, user.id, crewId, confirmName);
+  } catch (error) {
+    return failure(error);
+  }
+  const store = await cookies();
+  // The service trims the id, so compare the trimmed value the same way.
+  if (store.get(ACTIVE_CREW_COOKIE)?.value === crewId.trim()) store.delete(ACTIVE_CREW_COOKIE);
+  revalidatePath("/", "layout");
+  redirect("/ekipler");
 }

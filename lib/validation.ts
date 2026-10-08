@@ -93,10 +93,19 @@ export function parseLineup(value: unknown) {
   return rows;
 }
 
-export function parseCrewName(form: FormData) {
-  const name = text(form.get("name"), "Ekip adı", 3, 40);
+/**
+ * Validates and normalises a crew name (create AND rename share this rule, so a
+ * crew can never be renamed to something it could not have been created with).
+ * Accepts `unknown` because Server Action arguments are attacker-controlled.
+ */
+export function normalizeCrewName(value: unknown): string {
+  const name = text(value, "Ekip adı", 3, 40);
   // Collapse repeated spaces so "A  Takımı" and "A Takımı" are the same crew.
-  return { name: name.replace(/\s+/g, " ") };
+  return name.replace(/\s+/g, " ");
+}
+
+export function parseCrewName(form: FormData) {
+  return { name: normalizeCrewName(form.get("name")) };
 }
 
 /**

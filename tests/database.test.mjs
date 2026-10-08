@@ -13,6 +13,7 @@ import { aggregateCrewStandings } from "../lib/crew-standings.ts";
 import { getCrewOvr, getCrewOvrByProfile } from "../lib/crew-ovr.ts";
 import { getCrewSeasonLeaders } from "../lib/crew-leaders.ts";
 import { kickCrewMember } from "../lib/crew-kick.ts";
+import { deleteCrewByOwner, renameCrewByOwner } from "../lib/crew-manage.ts";
 import { generateInviteCode, normalizeInviteCode } from "../lib/validation.ts";
 import { CREW_MEMBER_LIMIT } from "../lib/football.ts";
 import {
@@ -593,7 +594,117 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
       { id: ctxBVoterProfile.id, team: "B", position: "DEF" }, { id: extraProfiles[1].id, team: "B", position: "DEF" },
     ] }), /üyelerinden/);
 
-    console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages, historical snapshots, crew peer voting rules, stat rollback on delete, crew data isolation, invitations, invite links, member removal with preserved history, contextual OVR, crew-scoped leaderboards and crew-only lineups.");
+    // ---- Renaming and deleting a crew (OWNER only) ------------------------
+    const makePlayer = (label) => db.user.create({ data: { email: `${label}-${randomUUID()}@test.dev`, name: label, playerProfile: { create: { position: "MID", ovrRating: 60 } } }, include: { playerProfile: true } });
+    const [delOwner, delCaptain, delMateA, delMateB, delBossB, delFillerB, delOutsider, delApplicant] = await Promise.all(["Kurucu", "Kaptan", "UyeA", "UyeB", "DigerKurucu", "DigerUye", "Disarida", "Basvuran"].map(makePlayer));
+    const doomed = await db.crew.create({ data: { name: "Silinecek Ekip", ownerId: delOwner.id, inviteCode: generateInviteCode(), members: { create: [
+      { userId: delOwner.id, role: "OWNER" }, { userId: delCaptain.id, role: "CAPTAIN" }, { userId: delMateA.id }, { userId: delMateB.id },
+    ] } } });
+    const survivor = await db.crew.create({ data: { name: "Kalacak Ekip", ownerId: delBossB.id, inviteCode: generateInviteCode(), members: { create: [
+      { userId: delBossB.id, role: "OWNER" }, { userId: delMateA.id }, { userId: delMateB.id }, { userId: delFillerB.id },
+    ] } } });
+    const newMatch = (actor, crewId, rows) => createGlobalMatch(db, actor.id, { requestId: randomUUID(), date: new Date().toISOString(), crewId, lineup: rows.map(([p, team]) => ({ id: p.playerProfile.id, team, position: "MID" })) });
+    const stat = (p, goals, assists) => ({ id: p.playerProfile.id, goals, assists });
+    // The doomed crew: one REPORTED match (goals, an assist, a MOTM) and one still ONGOING.
+    const doomedLineup = [[delOwner, "A"], [delCaptain, "A"], [delMateA, "B"], [delMateB, "B"]];
+    const doomedReported = await newMatch(delOwner, doomed.id, doomedLineup);
+    await reportGlobalMatch(db, delOwner.id, doomedReported, { scoreA: 2, scoreB: 1, motmId: delMateA.playerProfile.id, players: [stat(delOwner, 1, 1), stat(delCaptain, 1, 0), stat(delMateA, 1, 0), stat(delMateB, 0, 0)] });
+    const doomedPending = await newMatch(delOwner, doomed.id, doomedLineup);
+    // The survivor crew shares two players; what they earned there must stay.
+    const survivorMatch = await newMatch(delBossB, survivor.id, [[delMateA, "A"], [delBossB, "A"], [delMateB, "B"], [delFillerB, "B"]]);
+    await reportGlobalMatch(db, delBossB.id, survivorMatch, { scoreA: 2, scoreB: 0, motmId: delMateA.playerProfile.id, players: [stat(delMateA, 2, 0), stat(delBossB, 0, 0), stat(delMateB, 0, 0), stat(delFillerB, 0, 0)] });
+    await castPeerVote(db, delMateA.id, doomed.id, delMateB.id, scores(80));
+    await castPeerVote(db, delMateA.id, survivor.id, delMateB.id, scores(70));
+    await db.crewInvitation.create({ data: { crewId: doomed.id, senderId: delOwner.id, receiverId: delOutsider.id } });
+    await db.crewRequest.create({ data: { crewId: doomed.id, userId: delApplicant.id } });
+    const counters = async (p) => { const row = await db.playerProfile.findUniqueOrThrow({ where: { id: p.playerProfile.id } }); return { goals: row.goals, assists: row.assists, played: row.matchesPlayed, motm: row.motmCount }; };
+    const seasonLine = async (p) => { const row = await db.playerSeasonStat.findFirstOrThrow({ where: { playerProfileId: p.playerProfile.id } }); return { goals: row.goals, assists: row.assists, played: row.matchesPlayed, motm: row.motmCount }; };
+    assert.deepEqual(await counters(delMateA), { goals: 3, assists: 0, played: 2, motm: 2 });
+    assert.deepEqual(await seasonLine(delMateA), { goals: 3, assists: 0, played: 2, motm: 2 });
+
+
+    // -- rename: only the OWNER, with the creation rules, unique ignoring case
+    for (const actor of [delCaptain, delMateA, delOutsider, delBossB]) {
+      await assert.rejects(renameCrewByOwner(db, actor.id, doomed.id, "Ele Gecirilen Ad"), /kurucusu/);
+    }
+    assert.equal((await db.crew.findUniqueOrThrow({ where: { id: doomed.id } })).name, "Silinecek Ekip");
+    for (const bad of ["", "ab", "x".repeat(41), null, 7]) await assert.rejects(renameCrewByOwner(db, delOwner.id, doomed.id, bad), /karakter/);
+    await assert.rejects(renameCrewByOwner(db, delOwner.id, doomed.id, "  kalacak   EKIP "), /zaten var/);
+    await assert.rejects(renameCrewByOwner(db, delOwner.id, "no-such-crew", "Yeni Ad"), /bulunamadı/);
+    assert.deepEqual(await renameCrewByOwner(db, delOwner.id, doomed.id, "  Yeni    Ad  "), { id: doomed.id, name: "Yeni Ad", changed: true });
+    assert.equal((await db.crew.findUniqueOrThrow({ where: { id: doomed.id } })).name, "Yeni Ad");
+    assert.equal((await renameCrewByOwner(db, delOwner.id, doomed.id, "Yeni Ad")).changed, false);
+    // Changing only the capitalisation of the crew's own name is not a duplicate.
+    assert.equal((await renameCrewByOwner(db, delOwner.id, doomed.id, "YENI AD")).changed, true);
+    await renameCrewByOwner(db, delOwner.id, doomed.id, "Silinecek Ekip");
+    // A rename touches the name only.
+    assert.equal(await db.crewMember.count({ where: { crewId: doomed.id } }), 4);
+    assert.equal(await db.match.count({ where: { crewId: doomed.id } }), 2);
+
+
+    // -- delete: every refusal leaves everything exactly as it was
+    const globalMatchesBefore = await db.match.count({ where: { crewId: null } });
+    const snapshot = async () => ({
+      crew: await db.crew.count({ where: { id: doomed.id } }),
+      members: await db.crewMember.count({ where: { crewId: doomed.id } }),
+      matches: await db.match.count({ where: { crewId: doomed.id } }),
+      votes: await db.playerRatingVote.count({ where: { crewId: doomed.id } }),
+      mateA: await counters(delMateA),
+      mateASeason: await seasonLine(delMateA),
+    });
+    const intact = await snapshot();
+    for (const [actor, confirm, expected] of [
+      [delCaptain, "Silinecek Ekip", /kurucusu/], [delMateA, "Silinecek Ekip", /kurucusu/],
+      [delOutsider, "Silinecek Ekip", /kurucusu/], [delBossB, "Silinecek Ekip", /kurucusu/],
+      [delOwner, "Silinecek", /adını/], [delOwner, "silinecek ekip", /adını/], [delOwner, "", /adını/], [delOwner, null, /adını/], [delOwner, 42, /adını/],
+    ]) {
+      await assert.rejects(deleteCrewByOwner(db, actor.id, doomed.id, confirm), expected);
+      assert.deepEqual(await snapshot(), intact, "a refused delete must change nothing");
+    }
+    await assert.rejects(deleteCrewByOwner(db, delOwner.id, "no-such-crew", "x"), /bulunamadı/);
+
+    // -- a failure at the very last step rolls the whole rewind back
+    const failing = new Proxy(db, { get(target, prop) {
+      if (prop !== "$transaction") { const value = target[prop]; return typeof value === "function" ? value.bind(target) : value; }
+      return (fn, options) => target.$transaction((tx) => fn(new Proxy(tx, { get(inner, key) {
+        const value = inner[key];
+        if (key === "crew") return new Proxy(value, { get(model, op) { if (op === "delete") return () => { throw new Error("simulated failure"); }; const method = model[op]; return typeof method === "function" ? method.bind(model) : method; } });
+        return typeof value === "function" ? value.bind(inner) : value;
+      } })), options);
+    } });
+    await assert.rejects(deleteCrewByOwner(failing, delOwner.id, doomed.id, "Silinecek Ekip"), /simulated failure/);
+    assert.deepEqual(await snapshot(), intact, "an aborted delete must roll back the stat rewind and every row removal");
+
+    // A damaged history must not break the delete: this counter is already below
+    // what the match granted, so the rewind has to stop at zero.
+    await db.playerProfile.update({ where: { id: delCaptain.playerProfile.id }, data: { goals: 0 } });
+
+
+    // -- the real delete (typed name differs from the stored one only in spacing)
+    const outcome = await deleteCrewByOwner(db, delOwner.id, doomed.id, "  Silinecek   Ekip ");
+    assert.deepEqual(outcome, { id: doomed.id, name: "Silinecek Ekip", matchesDeleted: 2, membersRemoved: 4 });
+    assert.equal(await db.crew.findUnique({ where: { id: doomed.id } }), null);
+    for (const id of [doomedReported, doomedPending]) assert.equal(await db.match.findUnique({ where: { id } }), null);
+    assert.equal(await db.matchPlayer.count({ where: { matchId: { in: [doomedReported, doomedPending] } } }), 0);
+    assert.equal(await db.match.count({ where: { crewId: null } }), globalMatchesBefore, "no crew match may leak into the global archive as an orphan");
+    for (const model of ["crewMember", "playerRatingVote", "crewInvitation", "crewRequest"]) assert.equal(await db[model].count({ where: { crewId: doomed.id } }), 0, model);
+    // Career and season counters lose exactly what the deleted crew granted.
+    assert.deepEqual(await counters(delMateA), { goals: 2, assists: 0, played: 1, motm: 1 });
+    assert.deepEqual(await seasonLine(delMateA), { goals: 2, assists: 0, played: 1, motm: 1 });
+    assert.deepEqual(await counters(delOwner), { goals: 0, assists: 0, played: 0, motm: 0 });
+    assert.deepEqual(await seasonLine(delOwner), { goals: 0, assists: 0, played: 0, motm: 0 });
+    assert.deepEqual(await counters(delCaptain), { goals: 0, assists: 0, played: 0, motm: 0 }, "the rewind is clamped at zero");
+    assert.deepEqual(await counters(delMateB), { goals: 0, assists: 0, played: 1, motm: 0 });
+    // Accounts, the other crew and its history are untouched.
+    for (const person of [delOwner, delCaptain, delMateA, delMateB, delOutsider, delApplicant]) assert.notEqual(await db.user.findUnique({ where: { id: person.id } }), null);
+    assert.equal(await db.crewMember.count({ where: { crewId: survivor.id } }), 4);
+    assert.notEqual(await db.match.findUnique({ where: { id: survivorMatch } }), null);
+    assert.equal(await db.playerRatingVote.count({ where: { crewId: survivor.id } }), 1);
+    // Deleting twice is a clean refusal, not a crash.
+    await assert.rejects(deleteCrewByOwner(db, delOwner.id, doomed.id, "Silinecek Ekip"), /bulunamadı/);
+
+
+    console.log("PASS: global ratings, self-vote rejection, boundaries, update vs duplicate, concurrent averages, historical snapshots, crew peer voting rules, stat rollback on delete, crew data isolation, invitations, invite links, member removal with preserved history, contextual OVR, crew-scoped leaderboards, crew-only lineups and owner-only crew rename/delete with stat rewind.");
 
   } finally {
     if (createdSchema) await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);

@@ -8,6 +8,7 @@ import { getCrewDetail } from "@/lib/crew-service";
 import { prisma } from "@/lib/prisma";
 import { listIncomingInvitations } from "@/lib/invitation-service";
 import { BackToCrewsLink, CancelRequestButton, CrewInviteLink, CrewRequestsPanel, IncomingInvitationsPanel, InvitePlayerDialog, JoinCrewForm, JoinSuccessToast, LeaveCrewButton, RosterMemberMenu } from "@/components/crew-forms";
+import { CrewManageMenu } from "@/components/crew-manage-menu";
 import { PlayerAvatar } from "@/components/player-avatar";
 import { OvrBadge } from "@/components/ovr-badge";
 import { Badge } from "@/components/ui/badge";
@@ -67,7 +68,11 @@ export default async function CrewPage({ params, searchParams }: { params: Promi
     <section className="glass flex flex-wrap items-start justify-between gap-6 p-6 sm:p-8">
       <div className="min-w-0">
         <p className="eyebrow">PRO CLUBS</p>
-        <h1 className="mt-2 text-3xl font-bold tracking-tight">{crew.name}</h1>
+        <div className="mt-2 flex items-center gap-3">
+          <h1 className="min-w-0 text-3xl font-bold tracking-tight">{crew.name}</h1>
+          {/* Owner-only convenience; renameCrew / deleteCrew re-check on the server. */}
+          {crew.isOwner && <CrewManageMenu crewId={crew.id} crewName={crew.name} />}
+        </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Badge variant="secondary"><Crown className="mr-1 size-3" />Kaptan: {crew.ownerName}</Badge>
           <Badge variant="outline">{crew.memberCount} / {crew.memberLimit} üye</Badge>

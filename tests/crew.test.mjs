@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { canManageCrew, crewSearchKey, sortByStats, CREW_MANAGERS, CREW_MEMBER_LIMIT } from "../lib/football.ts";
-import { parseCrewName, parseCrewRequestMessage, text, ValidationError } from "../lib/validation.ts";
+import { normalizeCrewName, parseCrewName, parseCrewRequestMessage, text, ValidationError } from "../lib/validation.ts";
+import { CrewError } from "../lib/crew-error.ts";
+import { CrewError as KickCrewError } from "../lib/crew-kick.ts";
 
 const form = (entries) => {
   const data = new FormData();
@@ -44,6 +46,21 @@ test("crew name is trimmed, collapsed and length checked", () => {
   assert.equal(parseCrewName(form({ name: "  Kartal   SK " })).name, "Kartal SK");
   assert.throws(() => parseCrewName(form({ name: "ab" })), ValidationError);
   assert.throws(() => parseCrewName(form({ name: "x".repeat(41) })), ValidationError);
+});
+
+test("rename uses the same crew name rules as creation, for any untrusted value", () => {
+  assert.equal(normalizeCrewName("  Kartal   SK "), "Kartal SK");
+  assert.equal(normalizeCrewName("Kartal SK"), parseCrewName(form({ name: "Kartal SK" })).name);
+  for (const bad of ["", "  ", "ab", "x".repeat(41), null, undefined, 42, {}, ["Kartal SK"]]) {
+    assert.throws(() => normalizeCrewName(bad), ValidationError);
+  }
+});
+
+test("every crew-domain failure is one CrewError class, so the action layer can show its message", () => {
+  // crew-kick and crew-manage used to carry look-alike classes, which made
+  // `instanceof` in the action layer miss kick failures.
+  assert.equal(KickCrewError, CrewError);
+  assert.ok(new KickCrewError("x") instanceof CrewError);
 });
 
 test("crew request message is optional but bounded", () => {

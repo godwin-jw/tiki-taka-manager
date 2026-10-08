@@ -1,7 +1,9 @@
 import type { PrismaClient } from "@prisma/client";
 import { canManageCrew } from "./football.ts";
+import { CrewError } from "./crew-error.ts";
 
-export class CrewError extends Error {}
+// Re-exported so existing imports keep working; the class itself is shared.
+export { CrewError };
 
 /**
  * Removes a member from a crew, at the request of an OWNER or CAPTAIN.

@@ -6,9 +6,12 @@ import { CREW_MEMBER_LIMIT, canManageCrew, type CrewRoleName } from "@/lib/footb
 import type { AttributeScores } from "@/lib/rating";
 import { generateInviteCode } from "@/lib/validation";
 import { ensureInviteCode } from "@/lib/invitation-service";
+import { CrewError } from "@/lib/crew-error";
 import { DEFAULT_CREW_OVR, getCrewOvr } from "@/lib/crew-ovr";
 
-export class CrewError extends Error {}
+// One class shared with crew-kick / crew-manage, so the action layer's
+// `instanceof` check recognises every crew-domain failure.
+export { CrewError };
 
 /** Shape used by the crew card grid on /ekipler. */
 export async function listCrews(query?: string) {
@@ -292,3 +295,4 @@ export async function leaveCrew(userId: string, crewId: string) {
 // crew domain; the implementation lives in its own module so the test suite can
 // exercise it with an injected Prisma client.
 export { kickCrewMember } from "@/lib/crew-kick";
+export { deleteCrewByOwner, renameCrewByOwner } from "@/lib/crew-manage";

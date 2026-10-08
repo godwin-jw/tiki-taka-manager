@@ -266,7 +266,9 @@ try {
   const joinerPage = await joinerContext.newPage();
   await joinerPage.goto(`${base}/davet/${crew.inviteCode.toLowerCase()}`);
   await expect(joinerPage).toHaveURL(new RegExp(`/ekip/${crewId}\\?katildi=1`), { timeout: 15_000 });
-  await expect(joinerPage.getByText(/başarıyla katıldın/)).toBeVisible();
+  // Streaming briefly keeps a hidden copy of the banner in the DOM; a role query
+  // ignores hidden nodes, whereas getByText would hit a strict-mode violation.
+  await expect(joinerPage.getByRole("status").filter({ hasText: /başarıyla katıldın/ })).toBeVisible();
   assert.notEqual(await db.crewMember.findUnique({ where: { crewId_userId: { crewId, userId: joiner.id } } }), null);
   // Re-opening the same link is a no-op rather than a duplicate membership.
   await joinerPage.goto(`${base}/davet/${crew.inviteCode}`);
@@ -330,8 +332,82 @@ try {
   // The header workspace switcher follows the same cookie.
   await expect(page.getByRole("button", { name: /Aktif ekip: Other Rating Crew/ })).toBeVisible();
 
+  // ---- Crew rename / delete (OWNER only) -----------------------------------
+  const boss = await db.user.create({ data: { name: "Crew Boss", email: "boss@example.test" } });
+  const member = await db.user.create({ data: { name: "Plain Member", email: "member@example.test" } });
+  // The owner's second crew: the rename must not collide with it, and it becomes
+  // the workspace fallback once the target crew is deleted.
+  await db.crew.create({ data: { name: "Keeper Crew", ownerId: boss.id, inviteCode: generateInviteCode(), members: { create: [{ userId: boss.id, role: "OWNER" }] } } });
+  const target = await db.crew.create({ data: { name: "Target Crew", ownerId: boss.id, inviteCode: generateInviteCode(), members: { create: [{ userId: boss.id, role: "OWNER" }, { userId: member.id }] } } });
+  const bossContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await bossContext.addCookies([{ name: "next-auth.session-token", value: await sessionFor(boss), url: base }, { name: "activeCrewId", value: target.id, url: base }]);
+  const bossPage = await bossContext.newPage();
+  // The delete action ends in redirect(); that must never surface as a page error.
+  const bossErrors = [];
+  bossPage.on("pageerror", error => bossErrors.push(error.message));
+  const memberContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await memberContext.addCookies([{ name: "next-auth.session-token", value: await sessionFor(member), url: base }]);
+  const memberPage = await memberContext.newPage();
 
-  console.log("PASS: guest protection, profile, captain role, roster, draft, transfers, match creation, report, leaderboard, mobile menu, layout, in-app invitations, invite-link onboarding and the context-aware Ekibim menu.");
+  // The management menu exists for the owner only.
+  await memberPage.goto(`${base}/ekip/${target.id}`);
+  await expect(memberPage.getByRole("heading", { name: "Target Crew" })).toBeVisible();
+  await expect(memberPage.getByRole("button", { name: "Ekip yönetimi" })).toHaveCount(0);
+  await bossPage.goto(`${base}/ekip/${target.id}`);
+  await hydrated(bossPage);
+  const manage = bossPage.getByRole("button", { name: "Ekip yönetimi" });
+  await expect(manage).toBeVisible();
+
+  // Rename: the dialog stays until the server answers; a taken name is refused in place.
+  await manage.click();
+  await bossPage.getByRole("menuitem", { name: "Yeniden adlandır" }).click();
+  const renameDialog = bossPage.getByRole("dialog", { name: "Ekibi yeniden adlandır" });
+  await expect(renameDialog.getByRole("button", { name: "Adı kaydet" })).toBeDisabled();
+  await renameDialog.getByLabel("Yeni ekip adı").fill("keeper   crew");
+  await renameDialog.getByRole("button", { name: "Adı kaydet" }).click();
+  await expect(renameDialog.getByRole("alert")).toContainText("zaten var");
+  await expect(renameDialog).toBeVisible();
+  await renameDialog.getByLabel("Yeni ekip adı").fill("Renamed Crew");
+  await renameDialog.getByRole("button", { name: "Adı kaydet" }).click();
+  await expect(renameDialog).toHaveCount(0);
+  await expect(bossPage.getByRole("heading", { name: "Renamed Crew" })).toBeVisible();
+  await expect(bossPage.getByRole("button", { name: /Aktif ekip: Renamed Crew/ })).toBeVisible();
+  assert.equal((await db.crew.findUniqueOrThrow({ where: { id: target.id } })).name, "Renamed Crew");
+  // Another member sees the new name after a reload, without any further action.
+  await memberPage.reload();
+  await expect(memberPage.getByRole("heading", { name: "Renamed Crew" })).toBeVisible();
+
+  // Delete: the button stays locked until the exact name is typed.
+  await bossPage.getByRole("button", { name: "Ekip yönetimi" }).click();
+  await bossPage.getByRole("menuitem", { name: "Ekibi sil" }).click();
+  const deleteDialog = bossPage.getByRole("alertdialog");
+  const confirmDelete = deleteDialog.getByRole("button", { name: "Ekibi kalıcı olarak sil" });
+  await expect(confirmDelete).toBeDisabled();
+  await deleteDialog.getByLabel(/Onaylamak için ekibin adını yazın/).fill("Renamed Crew ");
+  await expect(confirmDelete).toBeEnabled();
+  await deleteDialog.getByLabel(/Onaylamak için ekibin adını yazın/).fill("renamed crew");
+  await expect(confirmDelete).toBeDisabled();
+  await deleteDialog.getByLabel(/Onaylamak için ekibin adını yazın/).fill("Renamed Crew");
+  assert.equal(await activeCookie(bossContext), target.id);
+  await confirmDelete.click();
+  await expect(bossPage).toHaveURL(/\/ekipler$/);
+  assert.equal(await db.crew.findUnique({ where: { id: target.id } }), null);
+  assert.equal(await db.crewMember.count({ where: { crewId: target.id } }), 0);
+  // The workspace cookie that pointed at the deleted crew is gone, and the
+  // layout falls back to the crew the owner still belongs to.
+  await expect.poll(() => activeCookie(bossContext)).not.toBe(target.id);
+  await bossPage.goto(`${base}/ekipler`);
+  await expect(bossPage.getByRole("button", { name: /Aktif ekip: Keeper Crew/ })).toBeVisible();
+  assert.deepEqual(bossErrors, []);
+  // The former member is not stuck on the deleted crew either.
+  await memberPage.goto(`${base}/ekip/${target.id}`);
+  await expect(memberPage.getByRole("heading", { name: "Bu sayfa saha dışında." })).toBeVisible();
+  await memberContext.close();
+  await bossContext.close();
+
+
+
+  console.log("PASS: guest protection, profile, captain role, roster, draft, transfers, match creation, report, leaderboard, mobile menu, layout, in-app invitations, invite-link onboarding, the context-aware Ekibim menu and owner-only crew rename/delete.");
 } catch (error) {
   console.error(serverLog);
   throw error;
