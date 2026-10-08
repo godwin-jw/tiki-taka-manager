@@ -33,6 +33,9 @@ const env = { ...process.env, DATABASE_URL: url.toString(), DIRECT_URL: url.toSt
 let server, browser, createdSchema = false;
 let serverLog = "";
 mkdirSync("test-results", { recursive: true });
+// Server-rendered buttons exist before React attaches handlers; a click in that
+// window is silently lost. Wait until the sidebar is interactive before clicking.
+const hydrated = pg => pg.waitForFunction(() => { const b = document.querySelector("aside button"); return Boolean(b) && Object.keys(b).some(k => k.startsWith("__reactProps")); });
 
 try {
   await db.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
@@ -82,6 +85,7 @@ try {
   }) });
   await context.addCookies([{ name: "activeCrewId", value: matchCrew.id, url: base }]);
   await page.goto(`${base}/yeni-mac`);
+  await hydrated(page);
   await page.getByLabel("Toplam oyuncu").selectOption("10");
   const roster = page.locator("aside");
   for (const name of ["Captain Updated", "Test Player", ...Array.from({ length: 8 }, (_, i) => `Test Outfield ${i}`)]) await roster.getByRole("button", { name: new RegExp(`^${name},`) }).click();
@@ -280,7 +284,54 @@ try {
   await page.goto(`${base}/davet/bad`);
   await expect(page.getByRole("heading", { name: /Davet linki geçersiz/ })).toBeVisible();
 
-  console.log("PASS: guest protection, profile, captain role, roster, draft, transfers, match creation, report, leaderboard, mobile menu, layout, in-app invitations and invite-link onboarding.");
+  // ---- "Ekibim" context-aware sidebar item ---------------------------------
+  const sessionFor = async (user) => { const token = randomUUID(); await db.session.create({ data: { sessionToken: token, userId: user.id, expires: new Date(Date.now() + 3600_000) } }); return token; };
+  const activeCookie = async ctx => (await ctx.cookies(base)).find(c => c.name === "activeCrewId")?.value;
+  const menuOrder = ["Genel Bakış", "Oyuncu Profilim", "Ekibim", "Ekipler", "Yeni Maç"];
+
+  // 0 crews: toast + redirect to /ekipler, and no cookie is written.
+  const loner = await db.user.create({ data: { name: "Crewless Player", email: "crewless@example.test" } });
+  const lonerContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await lonerContext.addCookies([{ name: "next-auth.session-token", value: await sessionFor(loner), url: base }]);
+  const lonerPage = await lonerContext.newPage();
+  await lonerPage.goto(`${base}/ekipler`);
+  await hydrated(lonerPage);
+  const lonerNav = lonerPage.getByRole("navigation", { name: "Ana menü" });
+  assert.deepEqual(await lonerNav.locator("> a, > button, > div > button").allInnerTexts().then(items => items.map(item => item.trim().split("\n")[0])), menuOrder);
+  await lonerNav.getByRole("button", { name: "Ekibim" }).click();
+  await expect(lonerPage.getByRole("status").filter({ hasText: "Önce bir ekibe katılın" })).toBeVisible();
+  await expect(lonerPage).toHaveURL(/\/ekipler$/);
+  assert.equal(await activeCookie(lonerContext), undefined);
+  await lonerContext.close();
+
+  // 1 crew: a plain link straight to /ekip/[id] that also syncs the cookie.
+  const solo = await db.user.create({ data: { name: "Solo Member", email: "solo@example.test" } });
+  const soloCrew = await db.crew.create({ data: { name: "Solo Crew", ownerId: solo.id, inviteCode: generateInviteCode(), members: { create: [{ userId: solo.id, role: "OWNER" }] } } });
+  const soloContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await soloContext.addCookies([{ name: "next-auth.session-token", value: await sessionFor(solo), url: base }]);
+  const soloPage = await soloContext.newPage();
+  await soloPage.goto(`${base}/ekipler`);
+  await hydrated(soloPage);
+  await soloPage.getByRole("navigation", { name: "Ana menü" }).getByRole("link", { name: "Ekibim" }).click();
+  await expect(soloPage).toHaveURL(new RegExp(`/ekip/${soloCrew.id}$`));
+  await expect.poll(() => activeCookie(soloContext)).toBe(soloCrew.id);
+  await soloContext.close();
+
+  // 2+ crews: collapsible submenu; choosing a crew navigates AND rewrites the cookie.
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${base}/ekipler`);
+  await hydrated(page);
+  assert.equal(await activeCookie(context), ratingCrew.id);
+  const mainNav = page.getByRole("navigation", { name: "Ana menü" });
+  await mainNav.getByRole("button", { name: /^Ekibim/ }).click();
+  await mainNav.getByRole("link", { name: /^Other Rating Crew/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/ekip/${inactiveCrew.id}$`));
+  await expect.poll(() => activeCookie(context)).toBe(inactiveCrew.id);
+  // The header workspace switcher follows the same cookie.
+  await expect(page.getByRole("button", { name: /Aktif ekip: Other Rating Crew/ })).toBeVisible();
+
+
+  console.log("PASS: guest protection, profile, captain role, roster, draft, transfers, match creation, report, leaderboard, mobile menu, layout, in-app invitations, invite-link onboarding and the context-aware Ekibim menu.");
 } catch (error) {
   console.error(serverLog);
   throw error;
