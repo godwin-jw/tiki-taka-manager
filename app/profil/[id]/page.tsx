@@ -8,7 +8,8 @@ import { listSeasons } from "@/lib/season-data";
 import { SeasonPicker, SeasonReadOnlyNote } from "@/components/season-picker";
 import { PlayerCard } from "@/components/player-card";
 import { RatingSummary } from "@/components/rating-summary";
-import { getRatingSummary } from "@/lib/rating-data";
+import { getCrewRatingSummary } from "@/lib/rating-data";
+import { getActiveCrewContext } from "@/lib/active-crew";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,9 +48,10 @@ export default async function PublicProfilePage({ params, searchParams }: { para
   if (!player?.playerProfile) notFound();
   const profile = player.playerProfile;
 
-  const [seasons, summary, timeline, recentMatches] = await Promise.all([
+  // Stats are the ACTIVE crew's verdict and strictly read-only on this page.
+  const [workspace, seasons, timeline, recentMatches] = await Promise.all([
+    getActiveCrewContext(viewer.id),
     listSeasons(),
-    getRatingSummary(profile.id),
     prisma.playerSeasonStat.findMany({
       where: { playerProfileId: profile.id },
       select: { seasonId: true, ovrRating: true, goals: true, assists: true, matchesPlayed: true, motmCount: true },
@@ -66,6 +68,8 @@ export default async function PublicProfilePage({ params, searchParams }: { para
       },
     }),
   ]);
+  const summary = await getCrewRatingSummary(workspace.activeCrewId, player.id);
+  const activeCrewName = workspace.crews.find((crew) => crew.id === workspace.activeCrewId)?.name ?? null;
 
   // Default to the live season; fall back to the requested one, then to active.
   const activeSeason = seasons.find((season) => season.isActive);
@@ -98,7 +102,7 @@ export default async function PublicProfilePage({ params, searchParams }: { para
             name={player.name || "Oyuncu"}
             image={player.image}
             position={profile.position}
-            ovr={profile.ovrRating}
+            ovr={summary.ovr}
             jerseyNumber={profile.jerseyNumber}
             captain={player.role === "CAPTAIN"}
             scores={summary.scores}
@@ -191,7 +195,7 @@ export default async function PublicProfilePage({ params, searchParams }: { para
 
       <Card className="glass gap-0 border-0 lg:col-span-12">
         <CardContent className="p-0">
-          <RatingSummary {...summary} ovr={profile.ovrRating} />
+          <RatingSummary scores={summary.scores} count={summary.count} ovr={summary.ovr} crewName={activeCrewName} />
         </CardContent>
       </Card>
 

@@ -32,7 +32,7 @@ export function averageScores(averages: Record<RatingAttribute, number | null>):
 }
 
 /**
- * Peer-vote averaging for the community OVR.
+ * Crew stat-vote averaging for the contextual OVR.
  *
  * Votes are stored per crew, so two players who share two crews can hold two rows
  * for the same pair. Counting rows would let one teammate weigh twice, so votes
@@ -41,18 +41,24 @@ export function averageScores(averages: Record<RatingAttribute, number | null>):
  * Returns null when nobody has voted yet, which lets callers fall back to the
  * stored OVR instead of rendering a misleading zero.
  */
-export function averagePeerVotes(votes: ReadonlyArray<{ voterId: string; ovrRating: number; updatedAt?: Date }>): number | null {
-  const latestPerVoter = new Map<string, { ovrRating: number; updatedAt: number }>();
+export function averagePeerStats(
+  votes: ReadonlyArray<{ voterId: string; updatedAt?: Date } & Partial<AttributeScores>>,
+): { scores: AttributeScores; count: number } | null {
+  const latestPerVoter = new Map<string, { voterId: string; updatedAt: number } & Partial<AttributeScores>>();
   for (const vote of votes) {
     const at = vote.updatedAt ? vote.updatedAt.getTime() : 0;
     const current = latestPerVoter.get(vote.voterId);
     // Ties fall back to the later element so the newest row always wins.
-    if (!current || at >= current.updatedAt) latestPerVoter.set(vote.voterId, { ovrRating: vote.ovrRating, updatedAt: at });
+    if (!current || at >= current.updatedAt) latestPerVoter.set(vote.voterId, { ...vote, updatedAt: at });
   }
   if (latestPerVoter.size === 0) return null;
-  let total = 0;
-  for (const vote of latestPerVoter.values()) total += vote.ovrRating;
-  return total / latestPerVoter.size;
+  const scores = {} as AttributeScores;
+  for (const attr of ratingAttributes) {
+    let total = 0;
+    for (const vote of latestPerVoter.values()) total += vote[attr.key] ?? 0;
+    scores[attr.key] = total / latestPerVoter.size;
+  }
+  return { scores, count: latestPerVoter.size };
 }
 
 /** Clamps an OVR into the 0-99 range used by both the schema and the UI. */

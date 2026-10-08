@@ -46,7 +46,7 @@ export type PlayerCardProps = {
   name: string;
   image?: string | null;
   position: Position;
-  ovr: number;
+  ovr: number | null;
   jerseyNumber?: number | null;
   captain?: boolean;
   scores?: AttributeScores | null;
@@ -65,8 +65,8 @@ export function PlayerCard({
   ratingCount = 0,
   className,
 }: PlayerCardProps) {
-  const tier = tiers[ratingTier(ovr)];
-  const overall = Math.round(ovr);
+  const tier = tiers[ratingTier(ovr ?? 0)];
+  const overall = ovr === null ? "—" : Math.round(ovr);
   // Rating averages only exist once the community has voted.
   const rated: AttributeScores | null = ratingCount > 0 ? scores : null;
 

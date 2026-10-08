@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { PrismaClient } from "@prisma/client";
 import { createAuthAdapter } from "../lib/auth-adapter.ts";
 import { createGlobalMatch, deleteGlobalMatch, reportGlobalMatch } from "../lib/match-service.ts";
-import { ratePlayer, castPeerVote } from "../lib/rating-service.ts";
+import { castPeerVote } from "../lib/rating-service.ts";
 import { aggregateCrewStandings } from "../lib/crew-standings.ts";
 import { getCrewOvr, getCrewOvrByProfile } from "../lib/crew-ovr.ts";
 import { getCrewSeasonLeaders } from "../lib/crew-leaders.ts";
@@ -84,6 +84,19 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     // upgrade cleanly on top of every earlier crew migration.
     cpSync("prisma/migrations/20261016000000_crew_co_captain_role", path.join(migrations, "20261016000000_crew_co_captain_role"), { recursive: true });
     migrate();
+    // Crew stat ballots replace the single-number peer vote. A legacy vote is
+    // planted first so the migration's backfill has something to convert: every
+    // attribute must inherit the old number, losing no verdict.
+    const bfVoter = await db.user.create({ data: { email: `bf-voter-${randomUUID()}@test.dev` } });
+    const bfTarget = await db.user.create({ data: { email: `bf-target-${randomUUID()}@test.dev` } });
+    const bfCrew = await db.crew.create({ data: { name: "Backfill", ownerId: bfVoter.id, inviteCode: generateInviteCode() } });
+    await db.$executeRaw`INSERT INTO "PlayerRatingVote" ("id", "ovrRating", "updatedAt", "crewId", "voterId", "targetUserId") VALUES ('backfill-vote', 77, NOW(), ${bfCrew.id}, ${bfVoter.id}, ${bfTarget.id})`;
+    cpSync("prisma/migrations/20261017000000_crew_stat_votes", path.join(migrations, "20261017000000_crew_stat_votes"), { recursive: true });
+    migrate();
+    const migratedVote = await db.playerRatingVote.findFirstOrThrow({ where: { crewId: bfCrew.id } });
+    for (const attr of ["pace", "shooting", "passing", "dribbling", "defending", "physical"]) {
+      assert.equal(migratedVote[attr], 77, `backfill must carry the old vote into ${attr}`);
+    }
     const repaired = await db.crew.findUniqueOrThrow({ where: { id: "pre-invite" } });
     assert.notEqual(repaired.inviteCode, "BCCB52FF", "a hex code outside the alphabet must be replaced");
     assert.equal(normalizeInviteCode(repaired.inviteCode), repaired.inviteCode, "the repaired code must be redeemable");
@@ -174,10 +187,8 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await assert.rejects(createGlobalMatch(db, user.id, { ...input, requestId: randomUUID(), teamAName: "x".repeat(31) }));
 
 
-    // GÖREV 2: attribute ratings require a crew the rater and the target share,
-    // so the Voters crew (and every rater used below) is created before the first
-    // ratePlayer call. The peer-voting section reuses the same crew — and keeps
-    // legacy OUT of it so the cross-crew refusals there stay meaningful.
+    // All six-attribute votes are crew-scoped. A separate Bridge crew below
+    // verifies that a second crew's verdict never changes this one's average.
     const crew = await db.crew.create({ data: { name: "Voters", ownerId: user.id, inviteCode: generateInviteCode() } });
     await db.crewMember.create({ data: { crewId: crew.id, userId: user.id, role: "OWNER" } });
     await db.crewMember.create({ data: { crewId: crew.id, userId: extras[0].id, role: "MEMBER" } });
@@ -189,33 +200,44 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await db.crewMember.create({ data: { crewId: bridgeCrew.id, userId: user.id, role: "MEMBER" } });
 
     const scores = n => ({ pace: n, shooting: n, passing: n, dribbling: n, defending: n, physical: n });
-    await assert.rejects(ratePlayer(db, user.id, profile.id, scores(90)), /Kendini/);
-    await assert.rejects(ratePlayer(db, "missing-user", profile.id, scores(90)), /oturumu/);
-    await assert.rejects(ratePlayer(db, extras[0].id, "missing-profile", scores(90)), /bulunamadı/);
-    for (const value of [-1, 100, 3.5, null, "", NaN]) await assert.rejects(ratePlayer(db, extras[0].id, profile.id, { ...scores(60), pace: value }));
-    // Ordinary PLAYER accounts may vote; identity/OVR fields in payload are ignored.
-    await ratePlayer(db, extras[0].id, profile.id, { ...scores(0), ovrRating: 99, raterId: user.id });
-    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } })).ovrRating, 0);
-    await ratePlayer(db, extras[1].id, profile.id, scores(99));
-    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } })).ovrRating, 49.5);
-    await ratePlayer(db, extras[0].id, profile.id, scores(60));
-    assert.equal(await db.playerRating.count({ where: { playerProfileId: profile.id } }), 2);
-    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } })).ovrRating, 79.5);
+    const verdict = async (crewId, targetId) => (await getCrewOvr(db, crewId, [targetId])).get(targetId);
+    const seedOvr = (await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } })).ovrRating;
+    await assert.rejects(castPeerVote(db, user.id, crew.id, user.id, scores(90)), /Kendine/);
+    await assert.rejects(castPeerVote(db, "missing-user", crew.id, user.id, scores(90)), /oturumu/);
+    await assert.rejects(castPeerVote(db, extras[0].id, crew.id, "missing-user", scores(90)), /ekibin/);
+    for (const value of [-1, 100, 3.5, null, "", NaN]) await assert.rejects(castPeerVote(db, extras[0].id, crew.id, user.id, { ...scores(60), pace: value }));
+    // Ordinary players vote; submitted identity/OVR fields do not control the result.
+    await castPeerVote(db, extras[0].id, crew.id, user.id, { ...scores(0), ovrRating: 99, voterId: user.id });
+    assert.equal((await verdict(crew.id, user.id)).ovrRating, 0);
+    await castPeerVote(db, extras[1].id, crew.id, user.id, scores(99));
+    assert.deepEqual((await verdict(crew.id, user.id)).scores, scores(49.5));
+    assert.equal((await verdict(crew.id, user.id)).ovrRating, 50);
+    await castPeerVote(db, extras[0].id, crew.id, user.id, scores(60));
+    assert.equal(await db.playerRatingVote.count({ where: { crewId: crew.id, targetUserId: user.id } }), 2);
+    assert.equal((await verdict(crew.id, user.id)).ovrRating, 80);
     await Promise.all([
-      ratePlayer(db, extras[0].id, profile.id, scores(20)),
-      ratePlayer(db, extras[1].id, profile.id, scores(80)),
-      ratePlayer(db, legacy.id, profile.id, scores(50)),
+      castPeerVote(db, extras[0].id, crew.id, user.id, scores(20)),
+      castPeerVote(db, extras[1].id, crew.id, user.id, scores(80)),
+      castPeerVote(db, legacy.id, bridgeCrew.id, user.id, scores(10)),
     ]);
-    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } })).ovrRating, 50);
-    await Promise.all([ratePlayer(db, extras[0].id, profile.id, scores(30)), ratePlayer(db, extras[0].id, profile.id, scores(90))]);
-    const ratings = await db.playerRating.findMany({ where: { playerProfileId: profile.id } });
-    assert.equal(ratings.length, 3);
+    assert.equal((await verdict(crew.id, user.id)).ovrRating, 50);
+    assert.equal((await verdict(bridgeCrew.id, user.id)).ovrRating, 10);
+    await Promise.all([castPeerVote(db, extras[0].id, crew.id, user.id, scores(30)), castPeerVote(db, extras[0].id, crew.id, user.id, scores(90))]);
+    const ratings = await db.playerRatingVote.findMany({ where: { crewId: crew.id, targetUserId: user.id } });
+    assert.equal(ratings.length, 2);
+    assert.equal((await verdict(crew.id, user.id)).ovrRating, Math.round(ratings.reduce((sum, row) => sum + row.pace, 0) / 2));
     const dualProfile = await db.playerProfile.findUniqueOrThrow({ where: { id: profile.id } });
-    assert.ok(Math.abs(dualProfile.ovrRating - ratings.reduce((sum, row) => sum + row.pace, 0) / 3) < 1e-10);
+    assert.equal(dualProfile.ovrRating, seedOvr, "crew votes must not overwrite global OVR");
     assert.equal(dualProfile.goals, 1); assert.equal(dualProfile.matchesPlayed, 1);
     assert.equal((await db.matchPlayer.findUniqueOrThrow({ where: { matchId_playerProfileId: { matchId: globalId, playerProfileId: profile.id } } })).ovrAtMatch, 0);
-    await assert.rejects(db.playerRating.create({ data: { raterId: extras[0].id, playerProfileId: profile.id, ...scores(50) } }), { code: "P2002" });
-    await assert.rejects(db.playerRating.update({ where: { id: ratings[0].id }, data: { pace: 100 } }));
+    await assert.rejects(db.playerRatingVote.create({ data: { crewId: crew.id, voterId: extras[0].id, targetUserId: user.id, ...scores(50) } }), { code: "P2002" });
+    for (const attr of Object.keys(scores(0))) {
+      await assert.rejects(db.playerRatingVote.update({ where: { id: ratings[0].id }, data: { [attr]: 100 } }));
+      await assert.rejects(db.playerRatingVote.update({ where: { id: ratings[0].id }, data: { [attr]: -1 } }));
+    }
+    const noProfile = await db.user.create({ data: { email: `no-profile-${randomUUID()}@test.dev` } });
+    await db.crewMember.create({ data: { crewId: crew.id, userId: noProfile.id } });
+    await assert.rejects(castPeerVote(db, user.id, crew.id, noProfile.id, scores(50)), /profili bulunamadı/);
     // --- safe deletion ------------------------------------------------------
     // Only the creating captain may delete, and a plain PLAYER never may.
     await assert.rejects(deleteGlobalMatch(db, extras[0].id, globalId), /kaptan/);
@@ -271,40 +293,30 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     await db.crewMember.create({ data: { crewId: otherCrew.id, userId: otherCaptain.id, role: "MEMBER" } });
 
     await db.playerProfile.update({ where: { id: votedProfile.id }, data: { ovrRating: 10 } });
-    // Nobody may vote for themselves.
-    await assert.rejects(castPeerVote(db, user.id, crew.id, user.id, 99), /Kendine/);
-    // A non-member of the crew cannot vote inside it.
-    await assert.rejects(castPeerVote(db, legacy.id, crew.id, extras[0].id, 90), /ekibin/);
-    // A member cannot vote for someone outside their crew.
-    await assert.rejects(castPeerVote(db, user.id, crew.id, legacy.id, 90), /ekibin/);
-    // GÖREV 2: attribute ratings follow the same boundary as peer votes —
-    // `otherCaptain` (Outsiders only) and `extras[0]` (Voters) share no crew.
-    await assert.rejects(ratePlayer(db, otherCaptain.id, votedProfile.id, scores(70)), /aynı ekibin üyeleri/);
-    // An unknown voter session is rejected.
-    await assert.rejects(castPeerVote(db, "ghost-user", crew.id, extras[0].id, 90), /oturumu/);
-    // Out-of-range and malformed scores never reach the table.
+    // Nobody may vote for themselves or across crew boundaries.
+    await assert.rejects(castPeerVote(db, user.id, crew.id, user.id, scores(99)), /Kendine/);
+    await assert.rejects(castPeerVote(db, legacy.id, crew.id, extras[0].id, scores(90)), /ekibin/);
+    await assert.rejects(castPeerVote(db, user.id, crew.id, legacy.id, scores(90)), /ekibin/);
+    await assert.rejects(castPeerVote(db, otherCaptain.id, crew.id, extras[0].id, scores(70)), /aynı ekibin üyeleri/);
+    await assert.rejects(castPeerVote(db, "ghost-user", crew.id, extras[0].id, scores(90)), /oturumu/);
     for (const bad of [-1, 100, 3.5, "", null, NaN, "abc"]) {
-      await assert.rejects(castPeerVote(db, user.id, crew.id, extras[0].id, bad));
+      await assert.rejects(castPeerVote(db, user.id, crew.id, extras[0].id, { ...scores(50), physical: bad }));
     }
-    assert.equal(await db.playerRatingVote.count(), 0);
+    assert.equal(await db.playerRatingVote.count({ where: { crewId: crew.id, targetUserId: extras[0].id } }), 0);
 
-    // Two genuine crew-mates vote; the published OVR is their average.
-    await castPeerVote(db, user.id, crew.id, extras[0].id, 80);
-    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } })).ovrRating, 80);
-    await castPeerVote(db, extras[1].id, crew.id, extras[0].id, 60);
-    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } })).ovrRating, 70);
-    // Re-casting updates the same row instead of stacking duplicates.
-    await castPeerVote(db, user.id, crew.id, extras[0].id, 90);
-    assert.equal(await db.playerRatingVote.count({ where: { crewId: crew.id } }), 2);
-    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } })).ovrRating, 75);
-    // The unique key is crew-scoped, so the same pair may vote once per shared crew.
-    await assert.rejects(db.playerRatingVote.create({ data: { crewId: crew.id, voterId: user.id, targetUserId: extras[0].id, ovrRating: 50 } }), { code: "P2002" });
-    // The CHECK constraint holds even for a raw write that bypasses validation.
-    await assert.rejects(db.$executeRaw`INSERT INTO "PlayerRatingVote" ("id", "ovrRating", "updatedAt", "crewId", "voterId", "targetUserId") VALUES ('raw', 150, NOW(), ${crew.id}, ${user.id}, ${extras[0].id})`);
+    await castPeerVote(db, user.id, crew.id, extras[0].id, scores(80));
+    assert.equal((await verdict(crew.id, extras[0].id)).ovrRating, 80);
+    await castPeerVote(db, extras[1].id, crew.id, extras[0].id, scores(60));
+    assert.equal((await verdict(crew.id, extras[0].id)).ovrRating, 70);
+    await castPeerVote(db, user.id, crew.id, extras[0].id, scores(90));
+    assert.equal(await db.playerRatingVote.count({ where: { crewId: crew.id, targetUserId: extras[0].id } }), 2);
+    assert.equal((await verdict(crew.id, extras[0].id)).ovrRating, 75);
+    assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: votedProfile.id } })).ovrRating, 10);
+    await assert.rejects(db.playerRatingVote.create({ data: { crewId: crew.id, voterId: user.id, targetUserId: extras[0].id, ...scores(50) } }), { code: "P2002" });
 
-    // Leaving the crew revokes the ability to vote, and the published OVR refreshes.
+    // Leaving the crew revokes the ability to vote.
     await db.crewMember.delete({ where: { crewId_userId: { crewId: crew.id, userId: extras[1].id } } });
-    await assert.rejects(castPeerVote(db, extras[1].id, crew.id, extras[0].id, 10), /ekibin/);
+    await assert.rejects(castPeerVote(db, extras[1].id, crew.id, extras[0].id, scores(10)), /ekibin/);
 
     // --- crew data isolation ------------------------------------------------
     const inCrewProfile = votedProfile;
@@ -514,9 +526,9 @@ test("baseline upgrade, Google adapter, global profiles and match constraints", 
     }
     // extraProfiles[1] plays in the crew B match.
     await db.crewMember.create({ data: { crewId: secondCrew.id, userId: extraProfiles[1].userId, role: "MEMBER" } });
-    await castPeerVote(db, user.id, dualCrew.id, rated.id, 90);
-    await castPeerVote(db, aVoter.id, dualCrew.id, rated.id, 90);
-    await castPeerVote(db, legacy.id, secondCrew.id, rated.id, 30);
+    await castPeerVote(db, user.id, dualCrew.id, rated.id, scores(90));
+    await castPeerVote(db, aVoter.id, dualCrew.id, rated.id, scores(90));
+    await castPeerVote(db, legacy.id, secondCrew.id, rated.id, scores(30));
 
     const aView = await getCrewOvr(db, dualCrew.id, [rated.id]);
     const bView = await getCrewOvr(db, secondCrew.id, [rated.id]);

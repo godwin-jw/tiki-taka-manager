@@ -9,7 +9,8 @@ import { PlayerCard } from "@/components/player-card";
 import { ProfileForm, CaptainForm } from "@/components/profile-form";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { getRatingSummary } from "@/lib/rating-data";
+import { getCrewRatingSummary } from "@/lib/rating-data";
+import { getActiveCrewContext } from "@/lib/active-crew";
 import { RatingSummary } from "@/components/rating-summary";
 
 export const metadata: Metadata = { title: "Oyuncu Profilim" };
@@ -30,7 +31,10 @@ export default async function ProfilePage({ searchParams }: { searchParams: Prom
   const [sessionUser, { season: requestedSeason }] = await Promise.all([requireUser(), searchParams]);
   const user = await prisma.user.findUniqueOrThrow({ where: { id: sessionUser.id }, include: { playerProfile: true } });
   const profile = user.playerProfile;
-  const [summary, seasons] = await Promise.all([profile ? getRatingSummary(profile.id) : null, listSeasons()]);
+  // Attribute stats are the ACTIVE crew's verdict (read-only on this page).
+  const [workspace, seasons] = await Promise.all([getActiveCrewContext(sessionUser.id), listSeasons()]);
+  const summary = profile ? await getCrewRatingSummary(workspace.activeCrewId, sessionUser.id) : null;
+  const activeCrewName = workspace.crews.find((crew) => crew.id === workspace.activeCrewId)?.name ?? null;
   // Default to the requested season, then the live one.
   const selectedSeason = seasons.find(season => season.id === requestedSeason) ?? seasons.find(season => season.isActive) ?? seasons[0] ?? null;
   const seasonStat = profile && selectedSeason ? await getSeasonStat(profile.id, selectedSeason.id) : null;
@@ -54,7 +58,7 @@ export default async function ProfilePage({ searchParams }: { searchParams: Prom
       <Card className="glass relative gap-0 overflow-hidden border-0 py-0 lg:col-span-5 xl:col-span-4">
         <CardContent className="flex flex-col items-center gap-6 p-6 text-center">
           <div className="pointer-events-none absolute -top-20 -right-20 size-64 rounded-full bg-emerald-500/10 blur-3xl" aria-hidden />
-          <PlayerCard name={user.name || "Oyuncu"} image={user.image} position={profile?.position ?? "MID"} ovr={profile?.ovrRating ?? 0} jerseyNumber={profile?.jerseyNumber} captain={user.role === "CAPTAIN"} scores={summary?.scores ?? null} ratingCount={summary?.count ?? 0} className="relative mx-auto" />
+          <PlayerCard name={user.name || "Oyuncu"} image={user.image} position={profile?.position ?? "MID"} ovr={summary?.ovr ?? null} jerseyNumber={profile?.jerseyNumber} captain={user.role === "CAPTAIN"} scores={summary?.scores ?? null} ratingCount={summary?.count ?? 0} className="relative mx-auto" />
           <div className="relative space-y-3">
             <h2 className="text-2xl font-bold">{user.name || "Oyuncu"}</h2>
             <div className="flex flex-wrap justify-center gap-2">
@@ -123,7 +127,7 @@ export default async function ProfilePage({ searchParams }: { searchParams: Prom
 
       {summary && (
         <div className="lg:col-span-12">
-          <RatingSummary {...summary} ovr={profile?.ovrRating ?? 0} />
+          <RatingSummary scores={summary.scores} count={summary.count} ovr={summary.ovr} crewName={activeCrewName} />
         </div>
       )}
     </div>

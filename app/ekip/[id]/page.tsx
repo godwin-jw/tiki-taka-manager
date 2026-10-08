@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Crown, Lock, Shield, Swords, Target, Trophy, Users } from "lucide-react";
 import { requireUser } from "@/lib/auth";
+import { getActiveCrewContext } from "@/lib/active-crew";
 import { getCrewDetail } from "@/lib/crew-service";
 import { prisma } from "@/lib/prisma";
 import { listIncomingInvitations } from "@/lib/invitation-service";
@@ -44,10 +45,11 @@ function Leaderboard({ title, icon: Icon, rows, metric }: {
 export default async function CrewPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ katildi?: string }> }) {
   const user = await requireUser();
   const { id } = await params;
-  const [{ katildi }, crew, invitations] = await Promise.all([
+  const [{ katildi }, crew, invitations, workspace] = await Promise.all([
     searchParams,
     getCrewDetail(id, user.id),
     listIncomingInvitations(prisma, user.id),
+    getActiveCrewContext(user.id),
   ]);
   if (!crew) notFound();
   const justJoined = katildi === "1";
@@ -111,13 +113,14 @@ export default async function CrewPage({ params, searchParams }: { params: Promi
                   name: member.name,
                   image: member.image,
                   role: member.role,
-                  ovrRating: member.ovrRating,
-                  isUnrated: member.isUnrated,
-                  viewerVote: member.viewerVote,
+                  hasProfile: member.hasProfile,
+                  scores: member.scores,
+                  viewerScores: member.viewerScores,
                 }}
                 viewerId={user.id}
                 isManager={crew.isManager}
                 isOwner={crew.isOwner}
+                isActiveCrew={workspace.activeCrewId === crew.id}
               />
             </li>
           ))}</ul>

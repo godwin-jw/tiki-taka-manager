@@ -3,6 +3,7 @@ import "server-only";
 import { prisma } from "@/lib/prisma";
 import { getCrewSeasonLeaders } from "@/lib/crew-leaders";
 import { CREW_MEMBER_LIMIT, canManageCrew, type CrewRoleName } from "@/lib/football";
+import type { AttributeScores } from "@/lib/rating";
 import { generateInviteCode } from "@/lib/validation";
 import { ensureInviteCode } from "@/lib/invitation-service";
 import { DEFAULT_CREW_OVR, getCrewOvr } from "@/lib/crew-ovr";
@@ -110,17 +111,24 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
   const activeSeason = await prisma.season.findFirst({ where: { isActive: true }, select: { id: true } });
   const standings = activeSeason ? await getCrewSeasonLeaders(prisma, crewId, activeSeason.id) : null;
   const statByUser = new Map((standings?.rows ?? []).map(row => [row.userId, row]));
-  // The viewer's own vote per member, so the dialog can reopen on the stored value.
+  // The viewer's own ballot per member, so the dialog can reopen on the stored values.
   const viewerVotes = isMember
     ? await prisma.playerRatingVote.findMany({
         where: { crewId, voterId: viewerId },
-        select: { targetUserId: true, ovrRating: true },
+        select: { targetUserId: true, pace: true, shooting: true, passing: true, dribbling: true, defending: true, physical: true },
       })
     : [];
   // Contextual OVR for the roster: this crew's verdict only, so a player shared
   // with a stronger side is not shown the other crew's number here.
   const crewOvr = await getCrewOvr(prisma, crewId, crew.members.map(m => m.user.id));
-  const voteByUser = new Map(viewerVotes.map(vote => [vote.targetUserId, vote.ovrRating]));
+  const voteByUser = new Map(viewerVotes.map(vote => [vote.targetUserId, {
+    pace: vote.pace,
+    shooting: vote.shooting,
+    passing: vote.passing,
+    dribbling: vote.dribbling,
+    defending: vote.defending,
+    physical: vote.physical,
+  } satisfies AttributeScores]));
 
   const roster = crew.members.map((member) => {
     const scoped = statByUser.get(member.user.id);
@@ -137,13 +145,15 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
       ovrRating: contextual?.ovrRating ?? DEFAULT_CREW_OVR,
       isUnrated: contextual?.isUnrated ?? true,
       voteCount: contextual?.voteCount ?? 0,
+      // The crew's six-attribute average, seeds a fresh ballot in the dialog.
+      scores: contextual?.scores ?? null,
       // Career numbers are deliberately crew-scoped when a season exists.
       goals: scoped?.goals ?? 0,
       assists: scoped?.assists ?? 0,
       matchesPlayed: scoped?.matchesPlayed ?? 0,
       motmCount: scoped?.motmCount ?? 0,
       hasProfile: member.user.playerProfile !== null,
-      viewerVote: voteByUser.get(member.user.id) ?? null,
+      viewerScores: voteByUser.get(member.user.id) ?? null,
     };
   });
 

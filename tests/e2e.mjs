@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { PrismaClient } from "@prisma/client";
+import { generateInviteCode } from "../lib/validation.ts";
 
 // No dedicated test database configured: start a throwaway PostgreSQL so the
 // suite can always run. The application's DATABASE_URL is never touched.
@@ -71,6 +72,15 @@ try {
   assert.equal((await db.user.findUnique({ where: { id: captain.id } })).name, "Captain Updated");
   assert.equal((await db.playerProfile.findUnique({ where: { userId: captain.id } })).ovrRating, 88);
   await page.screenshot({ path: "test-results/profile.png", fullPage: true });
+  // Match creation now requires an active crew. Keep the original draft ratings
+  // as six-attribute ballots so this scenario still tests deterministic teams.
+  const matchUsers = await db.user.findMany({ include: { playerProfile: true } });
+  const matchCrew = await db.crew.create({ data: { name: "Match Crew", ownerId: captain.id, inviteCode: generateInviteCode(), members: { create: matchUsers.map(user => ({ userId: user.id, role: user.id === captain.id ? "OWNER" : "MEMBER" })) } } });
+  await db.playerRatingVote.createMany({ data: matchUsers.map(user => {
+    const score = user.playerProfile.ovrRating;
+    return { crewId: matchCrew.id, voterId: user.id === captain.id ? player.id : captain.id, targetUserId: user.id, pace: score, shooting: score, passing: score, dribbling: score, defending: score, physical: score };
+  }) });
+  await context.addCookies([{ name: "activeCrewId", value: matchCrew.id, url: base }]);
   await page.goto(`${base}/yeni-mac`);
   await page.getByLabel("Toplam oyuncu").selectOption("10");
   const roster = page.locator("aside");
@@ -128,36 +138,69 @@ try {
   const playerPage = await playerContext.newPage();
   await playerPage.goto(`${base}/yeni-mac`);
   await expect(playerPage.getByRole("heading", { name: "Takımının kaptanı ol." })).toBeVisible();
-  // PLAYER role can assess other players through the mobile global roster.
+  // The global roster opens a read-only card; former members cannot vote.
+  await db.crewMember.delete({ where: { crewId_userId: { crewId: matchCrew.id, userId: player.id } } });
   await playerPage.getByRole("button", { name: "Oyuncu havuzunu aç" }).click();
   await playerPage.getByRole("dialog").getByRole("link", { name: "Captain Updated profilini aç" }).click();
   await expect(playerPage).toHaveURL(new RegExp(`/oyuncu/${captain.id}$`));
   await expect(playerPage.getByRole("dialog")).toHaveCount(0);
+  await expect(playerPage.getByRole("button", { name: "Captain Updated için işlemler" })).toHaveCount(0);
+  await expect(playerPage.getByRole("region", { name: "Ekip değerlendirmesi" })).toContainText("— OVR");
+
+  const ratingCrew = await db.crew.create({ data: { name: "Rating Crew", ownerId: captain.id, inviteCode: generateInviteCode(), members: { create: [{ userId: captain.id, role: "OWNER" }, { userId: player.id }] } } });
+  const inactiveCrew = await db.crew.create({ data: { name: "Other Rating Crew", ownerId: captain.id, inviteCode: generateInviteCode(), members: { create: [{ userId: captain.id, role: "OWNER" }, { userId: player.id }] } } });
+  await playerContext.addCookies([{ name: "activeCrewId", value: ratingCrew.id, url: base }]);
+  await context.addCookies([{ name: "activeCrewId", value: ratingCrew.id, url: base }]);
+  await playerPage.reload();
+  const openVote = async () => {
+    await playerPage.getByRole("button", { name: "Captain Updated için işlemler" }).click();
+    await playerPage.getByRole("menuitem", { name: "Oy ver", exact: true }).click();
+    await expect(playerPage.getByRole("dialog")).toBeVisible();
+  };
+  await openVote();
   const labels = ["Hız (PAC)", "Şut (SHO)", "Pas (PAS)", "Dripling (DRI)", "Defans (DEF)", "Fizik (PHY)"];
   const values = [90, 80, 70, 60, 50, 40];
+  await expect(playerPage.getByRole("spinbutton")).toHaveCount(6);
   for (let i = 0; i < labels.length; i++) await playerPage.getByRole("spinbutton", { name: labels[i], exact: true }).fill(String(values[i]));
   await expect(playerPage.getByLabel("Değerlendirme OVR önizlemesi")).toHaveText("65.0");
-  await playerPage.getByRole("button", { name: "Değerlendirmeyi kaydet" }).click();
-  await expect(playerPage.getByRole("status").filter({ hasText: "Değerlendirmen kaydedildi" })).toBeVisible();
-  await expect(playerPage.getByRole("region", { name: "Topluluk değerlendirmesi" })).toContainText("1 değerlendirme");
-  assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: captain.playerProfile.id } })).ovrRating, 65);
+  // A modal left open when the workspace changes must not write to the old crew.
+  await playerContext.addCookies([{ name: "activeCrewId", value: inactiveCrew.id, url: base }]);
+  await playerPage.getByRole("button", { name: "Oyu kaydet" }).click();
+  await expect(playerPage.getByRole("alert")).toContainText("aktif ekibindeki");
+  assert.equal(await db.playerRatingVote.count({ where: { crewId: { in: [ratingCrew.id, inactiveCrew.id] } } }), 0);
+  await playerContext.addCookies([{ name: "activeCrewId", value: ratingCrew.id, url: base }]);
+  await playerPage.getByRole("button", { name: "Oyu kaydet" }).click();
+  await expect(playerPage.getByRole("dialog")).toHaveCount(0);
+  await expect(playerPage.getByRole("region", { name: "Ekip değerlendirmesi" })).toContainText("65.0 OVR");
+  assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: captain.playerProfile.id } })).ovrRating, 88);
   assert.equal(await playerPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   await playerPage.screenshot({ path: "test-results/player-rating-mobile.png", fullPage: true });
-  await playerPage.reload();
+
+  // The roster uses the same ballot and edits the same row.
+  await playerPage.goto(`${base}/ekip/${ratingCrew.id}`);
+  await openVote();
   await expect(playerPage.getByRole("spinbutton", { name: "Hız (PAC)", exact: true })).toHaveValue("90");
   for (const label of labels) await playerPage.getByRole("spinbutton", { name: label, exact: true }).fill("99");
-  await playerPage.getByRole("button", { name: "Değerlendirmeyi kaydet" }).click();
-  await expect(playerPage.getByRole("status").filter({ hasText: "Değerlendirmen kaydedildi" })).toBeVisible();
-  assert.equal(await db.playerRating.count({ where: { playerProfileId: captain.playerProfile.id } }), 1);
-  assert.equal((await db.playerProfile.findUniqueOrThrow({ where: { id: captain.playerProfile.id } })).ovrRating, 99);
+  await playerPage.getByRole("button", { name: "Oyu kaydet" }).click();
+  await expect(playerPage.getByRole("dialog")).toHaveCount(0);
+  assert.equal(await db.playerRatingVote.count({ where: { crewId: ratingCrew.id, targetUserId: captain.id } }), 1);
+  assert.equal(await db.playerRating.count(), 0, "the legacy global rating channel must stay unused");
+  await openVote();
+  await expect(playerPage.getByRole("spinbutton", { name: "Hız (PAC)", exact: true })).toHaveValue("99");
+  await playerPage.getByRole("button", { name: "Vazgeç" }).click();
+  await playerPage.goto(`${base}/ekip/${inactiveCrew.id}`);
+  await expect(playerPage.getByRole("button", { name: "Captain Updated için işlemler" })).toHaveCount(0);
+  await playerPage.goto(`${base}/profil/${captain.id}`);
+  await expect(playerPage.getByRole("region", { name: "Ekip değerlendirmesi" })).toContainText("99.0 OVR");
+  await expect(playerPage.getByRole("spinbutton")).toHaveCount(0);
+  await expect(playerPage.getByRole("button", { name: "Captain Updated için işlemler" })).toHaveCount(0);
   await page.goto(`${base}/oyuncu/${captain.id}`);
-  await expect(page.getByText(/Kendini değerlendiremezsin/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Değerlendirmeyi kaydet" })).toHaveCount(0);
+  await expect(page.getByText("Kendine oy veremezsin.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Captain Updated için işlemler" })).toHaveCount(0);
   await page.goto(`${base}/profil`);
-  await expect(page.getByRole("region", { name: "Topluluk değerlendirmesi" })).toContainText("99.0 OVR");
+  await expect(page.getByRole("region", { name: "Ekip değerlendirmesi" })).toContainText("99.0 OVR");
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await expect(page.locator("aside").getByRole("link", { name: "Captain Updated profilini aç" })).toContainText("99");
-  await page.locator("aside").getByRole("link", { name: "Test Player profilini aç" }).click();
+  await page.goto(`${base}/oyuncu/${player.id}`);
   await expect(page.getByRole("heading", { name: "Test Player", exact: true })).toBeVisible();
   await page.screenshot({ path: "test-results/player-rating-desktop.png", fullPage: true });
   assert.equal((await db.matchPlayer.findUniqueOrThrow({ where: { matchId_playerProfileId: { matchId, playerProfileId: captain.playerProfile.id } } })).ovrAtMatch, 88);

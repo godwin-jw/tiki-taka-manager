@@ -295,17 +295,24 @@ model PlayerSeasonStat {
   @@map("PlayerSeasonStat")
 }
 
-// One peer's OVR verdict for a team-mate, cast inside a single crew.
+// One crew-mate's six-attribute verdict for a team-mate, inside a single crew.
 //
 // Crew-scoped on purpose: a vote is only valid between two members of the same
 // crew, so the unique key is (crewId, voterId, targetUserId). The same pair may
-// therefore hold one vote per crew they share, which is why the published OVR
-// averages the votes per voter (latest wins) rather than per row.
+// therefore hold one stat line per crew they share, which is why every read
+// collapses per voter first (latest wins) and averages the six attributes.
+// The published crew OVR is DERIVED from these columns (mean of the six), never
+// stored here, so a row can never disagree with the OVR it implies.
 model PlayerRatingVote {
   id        String   @id @default(cuid())
-  // The OVR this peer awards. Kept as an integer 0-99; the database also carries
-  // a CHECK constraint so out-of-range rows cannot be written by any path.
-  ovrRating Int
+  // Each attribute is an integer 0-99; the migration adds one CHECK per column
+  // so out-of-range rows cannot be written by any path.
+  pace      Int
+  shooting  Int
+  passing   Int
+  dribbling Int
+  defending Int
+  physical  Int
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

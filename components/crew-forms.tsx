@@ -23,25 +23,32 @@ import {
 } from "@/components/ui/dialog";
 
 /**
- * Peer OVR voting between crew-mates.
+ * Six-attribute stat ballot between crew-mates.
  *
- * The dialog body is controlled by RosterMemberMenu (no trigger of its own).
- * The slider mirrors the stored score so re-casting opens on the current value,
- * and the server re-validates crew membership regardless of what is submitted.
+ * The dialog body is controlled by RosterMemberMenu and CrewVoteMenu
+ * (player card), so it has no trigger of its own. Each control mirrors the
+ * stored ballot so re-casting opens on the current values, and the server
+ * re-validates crew membership plus every attribute regardless of what is sent.
  */
-function VoteDialog({ crewId, targetUserId, name, image, currentOvr, existingVote, open, onOpenChange }: {
+function VoteDialog({ crewId, targetUserId, name, image, existingVote, fallbackScores, open, onOpenChange }: {
   crewId: string;
   targetUserId: string;
   name: string;
   image: string | null;
-  currentOvr: number;
-  /** The viewer's own previous vote in this crew, if any. */
-  existingVote: number | null;
+  /** The viewer's own previous ballot in this crew, if any. */
+  existingVote: AttributeScores | null;
+  /** The crew's published average, seeding a first-time ballot. */
+  fallbackScores: AttributeScores | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   const [state, action, pending] = useActionState(submitPeerVote, {});
-  const [score, setScore] = useState(existingVote ?? Math.round(currentOvr));
+  const [scores, setScores] = useState<AttributeScores>(
+    () => {
+      const seed = existingVote ?? fallbackScores;
+      return Object.fromEntries(ratingAttributes.map(attr => [attr.key, Math.round(seed?.[attr.key] ?? 50)])) as AttributeScores;
+    },
+  );
   // Close only after the server confirms, so validation errors stay readable.
   const lastState = useRef(state);
   useEffect(() => {
@@ -55,31 +62,49 @@ function VoteDialog({ crewId, targetUserId, name, image, currentOvr, existingVot
       <DialogHeader>
         <DialogTitle className="flex items-center gap-3">
           <PlayerAvatar name={name} image={image} className="size-9" />
-          {name} için OVR oyu
+          {name} için ekip değerlendirmesi
         </DialogTitle>
         <DialogDescription>
-          OVR puanı, ekip arkadaşlarının verdiği oyların ortalamasıdır. Kendine oy veremezsin.
+          Altı özelliği bu ekibin gözünden oyla. Oylar yalnızca ekibin ortalamasına yansır; kendine oy veremezsin.
         </DialogDescription>
       </DialogHeader>
       <form action={action} className="space-y-6">
         <input type="hidden" name="crewId" value={crewId} />
         <input type="hidden" name="targetUserId" value={targetUserId} />
-        <input type="hidden" name="ovrRating" value={score} />
         <div className="space-y-3">
-          <div className="flex items-baseline justify-between">
-            <label htmlFor={`ovr-${targetUserId}`} className="text-sm font-medium">Puanın</label>
-            <span className="font-mono text-3xl font-bold text-emerald-300">{score}</span>
-          </div>
-          <input
-            id={`ovr-${targetUserId}`}
-            type="range"
-            min={0}
-            max={99}
-            value={score}
-            onChange={event => setScore(Number(event.target.value))}
-            className="w-full accent-emerald-400"
-          />
-          <div className="flex justify-between text-[10px] text-zinc-500"><span>0</span><span>99</span></div>
+          {ratingAttributes.map(attr => <div key={attr.key} className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor={`vote-${attr.key}-${targetUserId}`} className="text-xs font-medium">{attr.label} ({attr.code})</Label>
+              <Input
+                id={`vote-${attr.key}-${targetUserId}`}
+                name={attr.key}
+                type="number"
+                min={0}
+                max={99}
+                step={1}
+                required
+                disabled={pending}
+                value={scores[attr.key]}
+                onChange={event => setScores(prev => ({ ...prev, [attr.key]: event.target.value === "" ? 0 : Math.min(99, Math.max(0, Number(event.target.value))) }))}
+                className="h-8 w-16 px-1 text-center font-mono"
+              />
+            </div>
+            <input
+              aria-label={`${attr.label} (${attr.code}) oy kaydırıcısı`}
+              type="range"
+              min={0}
+              max={99}
+              step={1}
+              disabled={pending}
+              value={scores[attr.key]}
+              onChange={event => setScores(prev => ({ ...prev, [attr.key]: Number(event.target.value) }))}
+              className="w-full accent-emerald-400"
+            />
+          </div>)}
+        </div>
+        <div className="flex items-center justify-between border-t border-white/10 pt-3">
+          <span className="text-sm text-zinc-400">Bu oyunun OVR&apos;ı</span>
+          <output aria-label="Değerlendirme OVR önizlemesi" className="font-mono text-xl font-bold text-emerald-300">{overallRating(scores).toFixed(1)}</output>
         </div>
         {state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}
         {state.success && <p role="status" className="text-sm text-emerald-300">{state.success}</p>}
@@ -87,7 +112,7 @@ function VoteDialog({ crewId, targetUserId, name, image, currentOvr, existingVot
           <DialogClose type="button">Vazgeç</DialogClose>
           <Button type="submit" disabled={pending}>
             {pending ? <LoaderCircle className="animate-spin" /> : <ThumbsUp />}
-            {pending ? "Kaydediliyor…" : "Oyunu kaydet"}
+            {pending ? "Kaydediliyor…" : "Oyu kaydet"}
           </Button>
         </DialogFooter>
       </form>
@@ -99,6 +124,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PlayerAvatar } from "@/components/player-avatar";
+import { overallRating, ratingAttributes, type AttributeScores } from "@/lib/rating";
 
 function Feedback({ state }: { state: { error?: string; success?: string } }) {
   return <>{state.error && <p role="alert" className="text-sm text-rose-300">{state.error}</p>}{state.success && <p role="status" className="text-sm text-emerald-300">{state.success}</p>}</>;
@@ -431,6 +457,37 @@ function RoleDialog({ crewId, targetUserId, name, role, open, onOpenChange }: {
   </AlertDialog>;
 }
 
+/** Player-card menu; profile pages remain read-only. Active crew members only. */
+export function CrewVoteMenu({ crewId, targetUserId, name, image, existingVote, fallbackScores }: {
+  crewId: string;
+  targetUserId: string;
+  name: string;
+  image: string | null;
+  /** The viewer's own previous ballot in this crew, if any. */
+  existingVote: AttributeScores | null;
+  /** The crew's published average, seeding a first-time ballot. */
+  fallbackScores: AttributeScores | null;
+}) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" aria-label={`${name} için işlemler`}><Ellipsis /></Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setOpen(true)}><ThumbsUp />Oy ver</DropdownMenuItem></DropdownMenuContent>
+    </DropdownMenu>
+    <VoteDialog
+      key={open ? "open" : "closed"}
+      crewId={crewId}
+      targetUserId={targetUserId}
+      name={name}
+      image={image}
+      existingVote={existingVote}
+      fallbackScores={fallbackScores}
+      open={open}
+      onOpenChange={setOpen}
+    />
+  </>;
+}
+
 type RosterRole = "OWNER" | "CAPTAIN" | "CO_CAPTAIN" | "MEMBER";
 
 /**
@@ -442,23 +499,25 @@ type RosterRole = "OWNER" | "CAPTAIN" | "CO_CAPTAIN" | "MEMBER";
  * promotions, officer-only removals — so the menu offers nothing the server
  * would refuse, and the dialogs re-check anyway.
  */
-export function RosterMemberMenu({ crewId, member, viewerId, isManager, isOwner }: {
+export function RosterMemberMenu({ crewId, member, viewerId, isManager, isOwner, isActiveCrew }: {
   crewId: string;
   member: {
     userId: string;
     name: string;
     image: string | null;
     role: RosterRole;
-    ovrRating: number;
-    isUnrated?: boolean;
-    /** The viewer's own previous vote in this crew, if any. */
-    viewerVote: number | null;
+    hasProfile: boolean;
+    /** The crew's published six-attribute average; seeds a fresh ballot. */
+    scores: AttributeScores | null;
+    /** The viewer's own previous ballot in this crew, if any. */
+    viewerScores: AttributeScores | null;
   };
   viewerId: string;
   /** The viewer manages this crew (OWNER / CAPTAIN / CO_CAPTAIN). */
   isManager: boolean;
   /** Only the crew owner may grant or revoke the CO_CAPTAIN role. */
   isOwner: boolean;
+  isActiveCrew: boolean;
 }) {
   const [voteOpen, setVoteOpen] = useState(false);
   const [kickOpen, setKickOpen] = useState(false);
@@ -466,7 +525,7 @@ export function RosterMemberMenu({ crewId, member, viewerId, isManager, isOwner 
   const [nextRole, setNextRole] = useState<"MEMBER" | "CO_CAPTAIN">("CO_CAPTAIN");
 
   const isSelf = member.userId === viewerId;
-  const canVote = !isSelf;
+  const canVote = !isSelf && isActiveCrew && member.hasProfile;
   const canChangeRole = isOwner && !isSelf && (member.role === "MEMBER" || member.role === "CO_CAPTAIN");
   const isOfficer = member.role === "CAPTAIN" || member.role === "CO_CAPTAIN";
   // Mirrors kickCrewMember: managers remove members, but officers only fall to
@@ -502,12 +561,13 @@ export function RosterMemberMenu({ crewId, member, viewerId, isManager, isOwner 
       </DropdownMenuContent>
     </DropdownMenu>
     <VoteDialog
+      key={voteOpen ? "open" : "closed"}
       crewId={crewId}
       targetUserId={member.userId}
       name={member.name}
       image={member.image}
-      currentOvr={member.ovrRating}
-      existingVote={member.viewerVote}
+      existingVote={member.viewerScores}
+      fallbackScores={member.scores}
       open={voteOpen}
       onOpenChange={setVoteOpen}
     />

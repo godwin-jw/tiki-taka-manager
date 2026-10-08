@@ -1,4 +1,4 @@
-import { averagePeerVotes, clampOvr } from "./rating.ts";
+import { averagePeerStats, clampOvr, overallRating, type AttributeScores } from "./rating.ts";
 import type { PrismaClient } from "@prisma/client";
 
 /**
@@ -11,8 +11,13 @@ import type { PrismaClient } from "@prisma/client";
 export const DEFAULT_CREW_OVR = 75;
 
 export type CrewOvrEntry = {
-  /** The crew-scoped rating, or null when this crew has cast no votes yet. */
+  /**
+   * The crew-scoped OVR derived from the six attributes (mean of the means),
+   * or null when this crew has cast no votes yet.
+   */
   ovrRating: number | null;
+  /** The crew's six-attribute average, or null while unrated. */
+  scores: AttributeScores | null;
   /** How many distinct voters contributed. */
   voteCount: number;
   /** True when the crew has not rated this player at all. */
@@ -40,13 +45,13 @@ export async function getCrewOvr(
   // Give every requested player an unrated entry so callers never have to
   // distinguish "not a member" from "not rated".
   for (const userId of targetUserIds) {
-    result.set(userId, { ovrRating: null, voteCount: 0, isUnrated: true });
+    result.set(userId, { ovrRating: null, scores: null, voteCount: 0, isUnrated: true });
   }
 
   const votes = await db.playerRatingVote.findMany({
     // crewId is the isolation boundary: a vote in another crew is invisible here.
     where: { crewId, targetUserId: { in: [...targetUserIds] } },
-    select: { targetUserId: true, voterId: true, ovrRating: true, updatedAt: true },
+    select: { targetUserId: true, voterId: true, pace: true, shooting: true, passing: true, dribbling: true, defending: true, physical: true, updatedAt: true },
   });
   if (votes.length === 0) return result;
 
@@ -58,9 +63,15 @@ export async function getCrewOvr(
   }
 
   for (const [userId, bucket] of byTarget) {
-    const average = averagePeerVotes(bucket);
+    const average = averagePeerStats(bucket);
     if (average === null) continue;
-    result.set(userId, { ovrRating: clampOvr(average), voteCount: new Set(bucket.map(v => v.voterId)).size, isUnrated: false });
+    result.set(userId, {
+      // Derived: the mean of the six attribute means, clamped into 0-99.
+      ovrRating: clampOvr(overallRating(average.scores)),
+      scores: average.scores,
+      voteCount: average.count,
+      isUnrated: false,
+    });
   }
   return result;
 }
@@ -78,7 +89,7 @@ export async function getCrewOvrByProfile(
 ): Promise<Map<string, CrewOvrEntry>> {
   const result = new Map<string, CrewOvrEntry>();
   if (profileIds.length === 0) return result;
-  for (const id of profileIds) result.set(id, { ovrRating: null, voteCount: 0, isUnrated: true });
+  for (const id of profileIds) result.set(id, { ovrRating: null, scores: null, voteCount: 0, isUnrated: true });
 
   const profiles = await db.playerProfile.findMany({
     where: { id: { in: [...profileIds] } },
