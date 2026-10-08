@@ -1,13 +1,13 @@
 import "server-only";
 
 import { prisma } from "@/lib/prisma";
-import { getCrewSeasonLeaders } from "@/lib/crew-leaders";
+import { aggregateCrewStandings } from "@/lib/crew-standings";
 import { CREW_MEMBER_LIMIT, canManageCrew, type CrewRoleName } from "@/lib/football";
 import type { AttributeScores } from "@/lib/rating";
 import { generateInviteCode } from "@/lib/validation";
 import { ensureInviteCode } from "@/lib/invitation-service";
 import { CrewError } from "@/lib/crew-error";
-import { DEFAULT_CREW_OVR, getCrewOvr } from "@/lib/crew-ovr";
+import { DEFAULT_CREW_OVR, getCrewOvr, type CrewOvrEntry } from "@/lib/crew-ovr";
 
 // One class shared with crew-kick / crew-manage, so the action layer's
 // `instanceof` check recognises every crew-domain failure.
@@ -55,76 +55,90 @@ export async function getCrewsOfUser(userId: string) {
 }
 
 export async function getCrewDetail(crewId: string, viewerId: string) {
-  const crew = await prisma.crew.findUnique({
-    where: { id: crewId },
-    select: {
-      id: true,
-      name: true,
-      logo: true,
-      createdAt: true,
-      inviteCode: true,
-      owner: { select: { id: true, name: true, image: true } },
-      members: {
-        orderBy: [{ joinedAt: "asc" }],
-        select: {
-          id: true,
-          role: true,
-          joinedAt: true,
-          user: {
-            select: {
-              id: true,
-              name: true,
-              image: true,
-              playerProfile: { select: { position: true, ovrRating: true, goals: true, assists: true, matchesPlayed: true, motmCount: true } },
+  // Phase 1: five reads that depend only on (crewId, viewerId), so they share one
+  // round trip instead of five. The viewer's own ballots are harmless for a
+  // non-member (the set is simply empty) and are discarded below in that case.
+  const [crew, membership, viewerRequest, activeSeason, viewerVotes] = await Promise.all([
+    prisma.crew.findUnique({
+      where: { id: crewId },
+      select: {
+        id: true,
+        name: true,
+        logo: true,
+        createdAt: true,
+        inviteCode: true,
+        owner: { select: { id: true, name: true, image: true } },
+        members: {
+          orderBy: [{ joinedAt: "asc" }],
+          select: {
+            id: true,
+            role: true,
+            joinedAt: true,
+            user: {
+              select: {
+                id: true,
+                name: true,
+                image: true,
+                playerProfile: { select: { id: true, position: true, ovrRating: true, goals: true, assists: true, matchesPlayed: true, motmCount: true } },
+              },
             },
           },
         },
+        _count: { select: { members: true } },
       },
-      _count: { select: { members: true } },
-    },
-  });
+    }),
+    getViewerMembership(crewId, viewerId),
+    prisma.crewRequest.findUnique({
+      where: { crewId_userId: { crewId, userId: viewerId } },
+      select: { status: true },
+    }),
+    prisma.season.findFirst({ where: { isActive: true }, select: { id: true } }),
+    // The viewer's own ballot per member, so the dialog can reopen on the stored values.
+    prisma.playerRatingVote.findMany({
+      where: { crewId, voterId: viewerId },
+      select: { targetUserId: true, pace: true, shooting: true, passing: true, dribbling: true, defending: true, physical: true },
+    }),
+  ]);
   if (!crew) return null;
 
   // Only members see the roster and the crew leaderboards.
-  const membership = await getViewerMembership(crewId, viewerId);
   const isMember = membership !== null;
   const isManager = canManageCrew(membership?.role);
 
-  const pendingRequests = isManager
-    ? await prisma.crewRequest.findMany({
-        where: { crewId, status: "PENDING" },
-        orderBy: { createdAt: "asc" },
-        select: {
-          id: true,
-          message: true,
-          createdAt: true,
-          user: { select: { id: true, name: true, image: true, playerProfile: { select: { ovrRating: true, position: true } } } },
-        },
-      })
-    : [];
-
-  const viewerRequest = await prisma.crewRequest.findUnique({
-    where: { crewId_userId: { crewId, userId: viewerId } },
-    select: { status: true },
-  });
-
-  // Crew-scoped season totals for the leaderboards. The career counters on
-  // PlayerProfile are platform-wide (they include other crews and global matches),
-  // so they must NOT be used here: that would leak outside scorers into this crew.
-  const activeSeason = await prisma.season.findFirst({ where: { isActive: true }, select: { id: true } });
-  const standings = activeSeason ? await getCrewSeasonLeaders(prisma, crewId, activeSeason.id) : null;
-  const statByUser = new Map((standings?.rows ?? []).map(row => [row.userId, row]));
-  // The viewer's own ballot per member, so the dialog can reopen on the stored values.
-  const viewerVotes = isMember
-    ? await prisma.playerRatingVote.findMany({
-        where: { crewId, voterId: viewerId },
-        select: { targetUserId: true, pace: true, shooting: true, passing: true, dribbling: true, defending: true, physical: true },
-      })
-    : [];
-  // Contextual OVR for the roster: this crew's verdict only, so a player shared
-  // with a stronger side is not shown the other crew's number here.
-  const crewOvr = await getCrewOvr(prisma, crewId, crew.members.map(m => m.user.id));
-  const voteByUser = new Map(viewerVotes.map(vote => [vote.targetUserId, {
+  // Phase 2: everything that needs phase 1's member list or the viewer's role.
+  // Non-members never see the roster, so its two aggregate queries are skipped
+  // for them (previously they were computed and then thrown away).
+  const profileIds = crew.members.flatMap(m => (m.user.playerProfile ? [m.user.playerProfile.id] : []));
+  const [pendingRequests, statTotals, crewOvr, inviteCode] = await Promise.all([
+    isManager
+      ? prisma.crewRequest.findMany({
+          where: { crewId, status: "PENDING" },
+          orderBy: { createdAt: "asc" },
+          select: {
+            id: true,
+            message: true,
+            createdAt: true,
+            user: { select: { id: true, name: true, image: true, playerProfile: { select: { ovrRating: true, position: true } } } },
+          },
+        })
+      : [],
+    // Crew-scoped season totals for the leaderboards. The career counters on
+    // PlayerProfile are platform-wide (they include other crews and global matches),
+    // so they must NOT be used here: that would leak outside scorers into this crew.
+    isMember && activeSeason
+      ? aggregateCrewStandings(prisma, crewId, activeSeason.id, profileIds)
+      : new Map<string, { goals: number; assists: number; matchesPlayed: number; motmCount: number }>(),
+    // Contextual OVR for the roster: this crew's verdict only, so a player shared
+    // with a stronger side is not shown the other crew's number here.
+    isMember
+      ? getCrewOvr(prisma, crewId, crew.members.map(m => m.user.id))
+      : new Map<string, CrewOvrEntry>(),
+    // A crew created before the invite feature is repaired on read, so the share
+    // link never renders as empty. The code is already loaded above, so the
+    // repair query only runs for the rare crew that has none.
+    crew.inviteCode || ensureInviteCode(prisma, crew.id),
+  ]);
+  const voteByUser = new Map((isMember ? viewerVotes : []).map(vote => [vote.targetUserId, {
     pace: vote.pace,
     shooting: vote.shooting,
     passing: vote.passing,
@@ -134,7 +148,8 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
   } satisfies AttributeScores]));
 
   const roster = crew.members.map((member) => {
-    const scoped = statByUser.get(member.user.id);
+    const profileId = member.user.playerProfile?.id;
+    const scoped = profileId ? statTotals.get(profileId) : undefined;
     const contextual = crewOvr.get(member.user.id);
     return {
       memberId: member.id,
@@ -165,9 +180,7 @@ export async function getCrewDetail(crewId: string, viewerId: string) {
     name: crew.name,
     logo: crew.logo,
     createdAt: crew.createdAt,
-    // A crew created before the invite feature is repaired on read, so the share
-    // link never renders as empty.
-    inviteCode: await ensureInviteCode(prisma, crew.id),
+    inviteCode,
     ownerName: crew.owner.name ?? "Bilinmiyor",
     ownerId: crew.owner.id,
     memberCount: crew._count.members,

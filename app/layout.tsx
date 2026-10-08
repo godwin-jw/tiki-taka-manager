@@ -5,7 +5,7 @@ import { Suspense } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getActiveCrewContext } from "@/lib/active-crew";
 import { getRoster, getSession } from "@/lib/data";
-import { ensureActiveSeason } from "@/lib/season-service";
+import { ensureActiveSeasonCached } from "@/lib/season-service";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const geistSans = Geist({
@@ -24,20 +24,30 @@ export const metadata: Metadata = {
 };
 
 async function Platform({ children }: { children: React.ReactNode }) {
-  const [session, players] = await Promise.all([getSession(), getRoster()]);
-  // Bootstraps "Sezon 1" the first time a signed-in user opens the app.
-  if (session?.user) await ensureActiveSeason();
-  // Active crew workspace: cookie → validated membership → first crew fallback.
-  const workspace = session?.user
-    ? await getActiveCrewContext(session.user.id)
-    : { activeCrewId: null, crews: [], cookieValid: true };
+  // The roster query starts right away (it checks the session on its own, in
+  // parallel with the query), so it overlaps the session lookup instead of
+  // queueing behind it.
+  const rosterPromise = getRoster();
+  // If the session lookup throws, the roster promise rejects too; mark it
+  // handled so only the original error surfaces.
+  rosterPromise.catch(() => undefined);
+  const session = await getSession();
+  const user = session?.user;
+  // Everything below depends only on the session, never on each other:
+  //  - the roster (already in flight),
+  //  - "Sezon 1" bootstrap on a signed-in user's first visit,
+  //  - the active crew workspace: cookie → validated membership → first crew.
+  const [players, , workspace] = await Promise.all([
+    rosterPromise,
+    user ? ensureActiveSeasonCached() : null,
+    user ? getActiveCrewContext(user.id) : { activeCrewId: null, crews: [], cookieValid: true },
+  ]);
   return (
     <AppShell
       user={session?.user ?? null}
       players={players}
       crews={workspace.crews}
       activeCrewId={workspace.activeCrewId}
-      needsSync={!workspace.cookieValid}
     >
       {children}
     </AppShell>

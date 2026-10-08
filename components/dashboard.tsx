@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { ArrowUpRight, CalendarDays, Crown, Medal, Plus, Swords, Target, Trophy, Users } from "lucide-react";
 import { prisma } from "@/lib/prisma";
@@ -6,6 +7,7 @@ import { PlayerAvatar } from "@/components/player-avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AuthButton } from "@/components/app-shell";
 import { MatchDeleteControl } from "@/components/match-delete-control";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getActiveCrewContext } from "@/lib/active-crew";
 import { getCrewSeasonLeaders } from "@/lib/crew-leaders";
@@ -13,6 +15,15 @@ import { sortByStats } from "@/lib/football";
 
 export function Welcome() {
   return <div className="py-8 sm:py-16"><section className="relative grid items-center gap-14 overflow-hidden lg:grid-cols-2"><div className="space-y-8"><p className="eyebrow">THE NEXT LEVEL OF YOUR GAME</p><h1 className="text-5xl leading-[1.05] font-black tracking-tighter sm:text-7xl">Sadece oynama.<br /><span className="text-emerald-400">Oyuna yön ver.</span></h1><p className="max-w-md text-base leading-relaxed text-zinc-400">Halısaha rekabetine profesyonel bir dokunuş. Dengeli takımlar, akıllı kadrolar ve her maçla büyüyen bir kariyer.</p><AuthButton /><p className="flex items-center gap-2 text-xs text-zinc-500"><Users className="size-4" />Tek Google hesabı. Tüm takımın aynı yerde.</p></div><div className="glass relative overflow-hidden border-emerald-400/20 p-8 sm:p-12"><div className="pointer-events-none absolute -top-16 -right-10 size-64 rounded-full bg-emerald-500/10 blur-3xl" /><div className="flex items-center justify-between"><span className="eyebrow">YOUR CLUB. CONNECTED.</span><Trophy className="size-6 text-amber-300" /></div><div aria-hidden="true" className="pitch relative my-8 flex h-64 items-center justify-center rounded-xl border border-emerald-100/20"><div className="absolute inset-4 border border-white/15" /><div className="absolute left-1/2 h-full border-l border-white/15" /><div className="size-24 rounded-full border border-white/20" /><Swords className="absolute size-12 text-emerald-100" /></div><div className="grid grid-cols-3 gap-3 text-center">{["Dengeli kadro", "Canlı rekabet", "Kalıcı istatistik"].map((label, i) => <div key={label}><span className="font-mono text-2xl text-emerald-300">0{i + 1}</span><p className="mt-2 text-[10px] text-zinc-400">{label}</p></div>)}</div></div></section><div className="mt-16 grid gap-5 md:grid-cols-3">{[{ icon: Swords, title: "Adil eşleşme", text: "OVR tabanlı yılan algoritmasıyla rekabetçi kadrolar." }, { icon: Target, title: "Her katkı değerli", text: "Gol, asist ve maçın adamı ödülleri tek bir profilde." }, { icon: Crown, title: "Kontrol kaptanda", text: "Esnek taktik tahtası ve güvenli maç sonu raporları." }].map(item => <Card key={item.title} className="glass"><CardHeader><item.icon className="mb-3 size-5 text-emerald-400" /><CardTitle>{item.title}</CardTitle></CardHeader><CardContent className="text-sm text-zinc-400">{item.text}</CardContent></Card>)}</div></div>;
+}
+
+/**
+ * Placeholder for a section that streams in on its own. Each slow block has its
+ * own Suspense boundary so the rest of the dashboard is not held back by the
+ * slowest query chain on the page.
+ */
+function SectionSkeleton({ label, className }: { label: string; className: string }) {
+  return <div role="status" aria-label={label}><Skeleton className={`w-full ${className}`} /></div>;
 }
 
 async function Leaderboards() {
@@ -37,9 +48,9 @@ export async function Dashboard({ userId, name }: { userId: string; name: string
   return <div className="space-y-8"><div className="flex flex-wrap items-center justify-between gap-4"><div><p className="eyebrow">CLUB OVERVIEW</p><h1 className="mt-2 text-3xl font-bold tracking-tight">Hoş geldin, {name.split(" ")[0]}.</h1><p className="mt-2 text-sm text-zinc-400">Bir sonraki maç, bir sonraki hikâye.</p></div><Button asChild><Link href="/yeni-mac"><Plus />Yeni maç oluştur</Link></Button></div><Tabs defaultValue="genel"><TabsList><TabsTrigger value="genel">Genel</TabsTrigger><TabsTrigger value="ekip">Ekip İçi</TabsTrigger></TabsList><TabsContent value="genel" className="space-y-8">
     <section className="glass relative overflow-hidden border-emerald-400/15 p-7 sm:p-10"><div className="pointer-events-none absolute -right-10 -bottom-20 size-72 rounded-full bg-emerald-400/10 blur-3xl" /><p className="eyebrow">BU SAHA SENİN</p><h2 className="mt-4 max-w-xl text-3xl leading-tight font-black sm:text-4xl">Kadronu kur.<br /><span className="text-emerald-400">Farkını sahada göster.</span></h2><p className="mt-4 max-w-lg text-sm leading-6 text-zinc-400">Oyuncu havuzundan seçim yap, dengeli takımları oluştur ve maçın yıldızlarını birlikte keşfet.</p><Button asChild variant="outline" className="mt-6"><Link href="/profil">Oyuncu kartımı düzenle<ArrowUpRight /></Link></Button><Swords className="pointer-events-none absolute right-12 bottom-12 hidden size-36 -rotate-12 text-emerald-400/10 md:block" /></section>
     <div className="grid grid-cols-3 gap-3 sm:gap-5">{[{ label: "Global oyuncu", value: playerCount, icon: Users }, { label: "Tamamlanan maç", value: matchCount, icon: Swords }, { label: "Kariyer golleri", value: total._sum.goals ?? 0, icon: Target }].map(item => <div key={item.label} className="glass p-4 sm:p-6"><item.icon className="mb-4 size-4 text-emerald-400" /><p className="font-mono text-2xl font-bold sm:text-3xl">{item.value}</p><p className="mt-2 text-[10px] text-zinc-500 sm:text-xs">{item.label}</p></div>)}</div>
-    <div><div className="mb-5 flex items-center gap-2"><Trophy className="size-5 text-amber-300" /><h2 className="text-xl font-bold">Sahanın liderleri</h2></div><Leaderboards /></div>
+    <div><div className="mb-5 flex items-center gap-2"><Trophy className="size-5 text-amber-300" /><h2 className="text-xl font-bold">Sahanın liderleri</h2></div><Suspense fallback={<SectionSkeleton label="Liderlik tabloları yükleniyor" className="h-64" />}><Leaderboards /></Suspense></div>
     <section className="glass overflow-hidden"><div className="flex items-center justify-between border-b border-white/10 p-5"><h2 className="font-semibold">Maç merkezi</h2><span className="text-[10px] text-zinc-500">SON 8 MAÇ</span></div>{!matches.length && <div className="p-10 text-center"><CalendarDays className="mx-auto mb-3 size-7 text-zinc-600" /><p className="text-sm text-zinc-400">Henüz global maç oluşturulmadı.</p><Button asChild variant="link" className="mt-2"><Link href="/yeni-mac">İlk maçı oluştur</Link></Button></div>}<div className="divide-y divide-white/5">{matches.map(match => <div key={match.id} className="flex items-center"><Link href={`/mac/${match.id}`} className="flex flex-1 items-center justify-between gap-4 p-5 transition-colors hover:bg-white/5"><div><p className="text-sm font-semibold">{match.teamAName} <span className="mx-2 text-zinc-600">vs</span> {match.teamBName}</p><p className="mt-1 text-[11px] text-zinc-500">{new Intl.DateTimeFormat("tr-TR", { day: "numeric", month: "long", timeZone: "Europe/Istanbul" }).format(match.date)} · {match._count.players} oyuncu{match.createdById === userId ? " · Senin maçın" : ""}</p></div><div className="flex items-center gap-4"><span className="font-mono text-lg font-bold">{match.status === "COMPLETED" ? `${match.teamAScore} : ${match.teamBScore}` : "— : —"}</span><span className="hidden rounded-md bg-emerald-400/10 px-2 py-1 text-[10px] text-emerald-300 sm:block">{match.status === "COMPLETED" ? "TAMAMLANDI" : match.status === "ONGOING" ? "RAPOR BEKLİYOR" : match.status === "CANCELLED" ? "İPTAL" : "TASLAK"}</span><ArrowUpRight className="size-4 text-zinc-500" /></div></Link>{match.createdById === userId && <MatchDeleteControl matchId={match.id} teamAName={match.teamAName} teamBName={match.teamBName} />}</div>)}</div></section>
-    {groups.length > 0 && <section><h2 className="mb-3 text-sm font-semibold text-zinc-400">Eski grup arşivin</h2><div className="flex flex-wrap gap-2">{groups.map(group => <Button key={group.id} asChild variant="outline" size="sm"><Link href={`/grup/${group.id}`}>{group.name}<ArrowUpRight /></Link></Button>)}</div></section>}</TabsContent><TabsContent value="ekip" className="space-y-8"><CrewOverview crewId={activeCrew.activeCrewId} crewName={activeCrew.crews.find(crew => crew.id === activeCrew.activeCrewId)?.name ?? null} userId={userId} /></TabsContent></Tabs>
+    {groups.length > 0 && <section><h2 className="mb-3 text-sm font-semibold text-zinc-400">Eski grup arşivin</h2><div className="flex flex-wrap gap-2">{groups.map(group => <Button key={group.id} asChild variant="outline" size="sm"><Link href={`/grup/${group.id}`}>{group.name}<ArrowUpRight /></Link></Button>)}</div></section>}</TabsContent><TabsContent value="ekip" className="space-y-8"><Suspense fallback={<SectionSkeleton label="Ekip verileri yükleniyor" className="h-96" />}><CrewOverview crewId={activeCrew.activeCrewId} crewName={activeCrew.crews.find(crew => crew.id === activeCrew.activeCrewId)?.name ?? null} userId={userId} /></Suspense></TabsContent></Tabs>
   </div>;
 }
 
@@ -56,14 +67,17 @@ async function CrewOverview({ crewId, crewName, userId }: { crewId: string | nul
   if (!crewId) {
     return <section className="glass space-y-4 p-10 text-center"><Users className="mx-auto size-8 text-emerald-400" /><h2 className="text-xl font-bold">Aktif bir ekipte değilsin.</h2><p className="text-sm text-zinc-400">Ekip istatistiklerini görmek için bir ekibe katıl; katıldıktan sonra başlıktaki ekip seçiciden istediğin ekibi seçebilirsin.</p><Button asChild className="mt-2"><Link href="/ekipler">Ekiplere git</Link></Button></section>;
   }
-  const [memberCount, completedCount, goalTotal, crewMatches, season] = await Promise.all([
+  // The standings only need the season id, so they are chained to that one query
+  // and run while the counts and the fixture list are still loading.
+  const standingsPromise = prisma.season.findFirst({ where: { isActive: true }, select: { id: true } })
+    .then(season => (season ? getCrewSeasonLeaders(prisma, crewId, season.id) : null));
+  const [memberCount, completedCount, goalTotal, crewMatches, standings] = await Promise.all([
     prisma.crewMember.count({ where: { crewId } }),
     prisma.match.count({ where: { crewId, status: "COMPLETED", groupId: null } }),
     prisma.matchPlayer.aggregate({ where: { match: { crewId, status: "COMPLETED", groupId: null } }, _sum: { goals: true } }),
     prisma.match.findMany({ where: { crewId, groupId: null }, orderBy: [{ date: "desc" }, { id: "desc" }], take: 8, select: { id: true, date: true, status: true, createdById: true, teamAName: true, teamBName: true, teamAScore: true, teamBScore: true, _count: { select: { players: true } } } }),
-    prisma.season.findFirst({ where: { isActive: true }, select: { id: true } }),
+    standingsPromise,
   ]);
-  const standings = season ? await getCrewSeasonLeaders(prisma, crewId, season.id) : null;
   // Top scorers of THIS crew; the OVR column is the crew's own vote average.
   const leaders = sortByStats(standings?.rows ?? [], "goals").slice(0, 8);
   const tiles = [

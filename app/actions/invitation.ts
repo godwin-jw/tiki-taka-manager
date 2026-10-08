@@ -80,6 +80,8 @@ export async function acceptCrewInvitation(_previous: ActionState, form: FormDat
   } catch (error) {
     return failure(error);
   }
+  // Deliberately layout-wide: accepting adds a membership, which changes the
+  // layout's crew list and the workspace switcher.
   revalidatePath("/", "layout");
   redirect(`/ekip/${crewId}?katildi=1`);
 }
@@ -91,6 +93,8 @@ export async function rejectCrewInvitation(_previous: ActionState, form: FormDat
   } catch (error) {
     return failure(error);
   }
-  revalidatePath("/", "layout");
+  // A rejection changes no membership, so the layout (crew list) is untouched;
+  // only the invitation panel on the crew pages needs to disappear.
+  revalidatePath("/ekip/[id]", "page");
   return { success: "Davet reddedildi." };
 }

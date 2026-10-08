@@ -1,5 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
-import { getCrewOvrByProfile, DEFAULT_CREW_OVR } from "./crew-ovr.ts";
+import { getCrewOvr, DEFAULT_CREW_OVR } from "./crew-ovr.ts";
 import { aggregateCrewStandings, type CrewStandingRow } from "./crew-standings.ts";
 
 /**
@@ -17,24 +17,31 @@ import { aggregateCrewStandings, type CrewStandingRow } from "./crew-standings.t
  * database, matching match-service, rating-service and crew-standings.
  */
 export async function getCrewSeasonLeaders(db: PrismaClient, crewId: string, seasonId: string) {
-  const crew = await db.crew.findUnique({ where: { id: crewId }, select: { id: true, name: true } });
+  // The crew header and its member list do not depend on each other.
+  const [crew, members] = await Promise.all([
+    db.crew.findUnique({ where: { id: crewId }, select: { id: true, name: true } }),
+    db.crewMember.findMany({
+      where: { crewId },
+      select: { user: { select: { id: true, name: true, playerProfile: { select: { id: true, position: true } } } } },
+    }),
+  ]);
   if (!crew) return null;
-
-  const members = await db.crewMember.findMany({
-    where: { crewId },
-    select: { user: { select: { id: true, name: true, playerProfile: { select: { id: true, position: true } } } } },
-  });
   const profileIds = members.map(m => m.user.playerProfile?.id).filter((id): id is string => Boolean(id));
   if (profileIds.length === 0) return { id: crew.id, name: crew.name, rows: [] as CrewStandingRow[] };
 
-  const totals = await aggregateCrewStandings(db, crewId, seasonId, profileIds);
-  const ovrByProfile = await getCrewOvrByProfile(db, crewId, profileIds);
+  // The member query already pairs every user with their profile, so the OVR is
+  // read by user id directly (getCrewOvrByProfile would look the pairs up again),
+  // and it runs alongside the season totals.
+  const [totals, ovrByUser] = await Promise.all([
+    aggregateCrewStandings(db, crewId, seasonId, profileIds),
+    getCrewOvr(db, crewId, members.filter(m => m.user.playerProfile).map(m => m.user.id)),
+  ]);
 
   const rows = members.flatMap((member): CrewStandingRow[] => {
     const profile = member.user.playerProfile;
     if (!profile) return [];
     const scoped = totals.get(profile.id);
-    const contextual = ovrByProfile.get(profile.id);
+    const contextual = ovrByUser.get(member.user.id);
     return [{
       userId: member.user.id,
       name: member.user.name ?? "Oyuncu",

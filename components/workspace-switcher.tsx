@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useTransition } from "react";
 import { Check, ChevronsUpDown, LoaderCircle, UsersRound } from "lucide-react";
 import { setActiveCrew } from "@/app/actions/active-crew";
 import { Button } from "@/components/ui/button";
@@ -20,15 +19,15 @@ import { cn } from "@/lib/utils";
  *
  * The choice lives in an HTTP-only cookie written by the setActiveCrew server
  * action, so every crew-scoped surface (dashboard tabs, match creation) sees
- * the same workspace without a URL parameter. The action revalidates the whole
- * layout, which is what makes the switch appear everywhere at once.
+ * the same workspace without a URL parameter. Writing that cookie makes Next
+ * re-render the current route in the action's own response, which is what makes
+ * the switch appear everywhere at once.
  */
 export function WorkspaceSwitcher({ crews, activeCrewId }: {
   crews: Array<{ id: string; name: string }>;
   activeCrewId: string | null;
 }) {
   const [pending, startTransition] = useTransition();
-  const router = useRouter();
   const active = crews.find((crew) => crew.id === activeCrewId) ?? crews[0];
   if (!active) return null;
 
@@ -36,8 +35,9 @@ export function WorkspaceSwitcher({ crews, activeCrewId }: {
     if (crewId === active?.id || pending) return;
     startTransition(async () => {
       // The server re-validates membership; an invalid id is simply ignored.
+      // The cookie write inside the action already re-renders the page in the
+      // same response, so no router.refresh() (a second full render) follows.
       await setActiveCrew(crewId);
-      router.refresh();
     });
   }
 
@@ -72,20 +72,8 @@ export function WorkspaceSwitcher({ crews, activeCrewId }: {
   );
 }
 
-/**
- * Persists the fallback workspace when the cookie was missing or stale.
- *
- * Server components can read but not write cookies, so the server passes down
- * the resolved crew plus a `needsSync` flag and this one-shot effect writes it
- * through the server action. Guarded by a ref so a re-render cannot loop the
- * action; once the cookie matches, needsSync turns false on the next request.
- */
-export function ActiveCrewSync({ activeCrewId, needsSync }: { activeCrewId: string | null; needsSync: boolean }) {
-  const sentRef = useRef(false);
-  useEffect(() => {
-    if (sentRef.current || !needsSync || !activeCrewId) return;
-    sentRef.current = true;
-    void setActiveCrew(activeCrewId);
-  }, [activeCrewId, needsSync]);
-  return null;
-}
+// There used to be an `ActiveCrewSync` effect here that persisted the fallback
+// workspace through setActiveCrew on a first visit. It was removed: the server
+// resolves the very same crew (earliest membership) whenever the cookie is
+// missing or stale, so the cookie carried no information, and writing it made
+// Next re-render the whole page a second time right after the first paint.

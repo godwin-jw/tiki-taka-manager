@@ -21,12 +21,18 @@ export async function getCrewRatingSummary(crewId: string | null, targetUserId: 
   ovr: number | null;
 }> {
   if (!crewId) return { scores: ZERO_SCORES, count: 0, ovr: null };
-  const membership = await prisma.crewMember.findUnique({
-    where: { crewId_userId: { crewId, userId: targetUserId } },
-    select: { id: true },
-  });
+  // The membership check and the vote aggregate are independent, so they share a
+  // round trip. A non-member is still reported as unrated exactly as before: the
+  // aggregate is simply discarded in that case.
+  const [membership, ovrByUser] = await Promise.all([
+    prisma.crewMember.findUnique({
+      where: { crewId_userId: { crewId, userId: targetUserId } },
+      select: { id: true },
+    }),
+    getCrewOvr(prisma, crewId, [targetUserId]),
+  ]);
   if (!membership) return { scores: ZERO_SCORES, count: 0, ovr: null };
-  const entry = (await getCrewOvr(prisma, crewId, [targetUserId])).get(targetUserId);
+  const entry = ovrByUser.get(targetUserId);
   if (!entry || entry.isUnrated || entry.scores === null || entry.ovrRating === null) {
     return { scores: ZERO_SCORES, count: 0, ovr: null };
   }

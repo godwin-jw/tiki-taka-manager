@@ -28,6 +28,12 @@ export async function submitPeerVote(_previous: ActionState, form: FormData): Pr
   } catch (error) {
     return { error: error instanceof ValidationError ? error.message : "Oyun kaydedilemedi. Lütfen tekrar deneyin." };
   }
-  revalidatePath("/", "layout");
+  // Votes are crew-scoped and never touch the global roster or the layout, so
+  // only the pages that display a crew OVR are refreshed.
+  revalidatePath("/");
+  revalidatePath("/ekip/[id]", "page");
+  revalidatePath("/oyuncu/[id]", "page");
+  revalidatePath("/profil/[id]", "page");
+  revalidatePath("/profil");
   return { success: "Değerlendirmen kaydedildi. Ekibin OVR ortalaması güncellendi." };
 }

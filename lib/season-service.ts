@@ -1,6 +1,8 @@
 import "server-only";
 
+import { unstable_cache } from "next/cache";
 import { prisma } from "@/lib/prisma";
+import { SEASON_TAG } from "@/lib/cache-tags";
 
 /**
  * Returns the live season, creating "Sezon 1" on first use.
@@ -21,6 +23,19 @@ export async function ensureActiveSeason(now = new Date()) {
     select: { id: true, name: true },
   });
 }
+
+/**
+ * The layout's "is there a live season?" bootstrap, remembered across requests.
+ *
+ * ensureActiveSeason is a read on every page view for a fact that changes once
+ * a season. The tag lets a season rollover drop the entry at once; the lifetime
+ * is only the fallback for a rollover done outside a Server Action.
+ */
+export const ensureActiveSeasonCached = unstable_cache(
+  () => ensureActiveSeason(),
+  ["active-season"],
+  { tags: [SEASON_TAG], revalidate: 300 },
+);
 
 /**
  * Rolls the season over: the current season is closed and the next one becomes

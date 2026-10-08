@@ -33,25 +33,33 @@ function StatTile({ label, value, icon: Icon }: { label: string; value: number; 
 }
 
 export default async function PublicProfilePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ season?: string }> }) {
-  const viewer = await requireUser();
-  const [{ id }, { season: requestedSeason }] = await Promise.all([params, searchParams]);
+  const [viewer, { id }, { season: requestedSeason }] = await Promise.all([requireUser(), params, searchParams]);
 
-  // Public fields only: phone, email and individual votes stay private.
-  const player = await prisma.user.findUnique({
-    where: { id },
-    select: {
-      id: true, name: true, image: true, role: true,
-      playerProfile: { select: { id: true, position: true, jerseyNumber: true, ovrRating: true, goals: true, assists: true, matchesPlayed: true, motmCount: true } },
-      crewMemberships: { select: { crew: { select: { id: true, name: true } } }, take: 1 },
-    },
-  });
+  // Stage 1: the player, the viewer's workspace, the season list and the crew
+  // verdict are all known from (viewer, id) alone, so they share one round trip.
+  // The verdict is chained to the workspace (it needs the active crew id), not to
+  // the player lookup; a missing player is rejected right after.
+  const workspacePromise = getActiveCrewContext(viewer.id);
+  const [player, workspace, seasons, summary] = await Promise.all([
+    // Public fields only: phone, email and individual votes stay private.
+    prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true, name: true, image: true, role: true,
+        playerProfile: { select: { id: true, position: true, jerseyNumber: true, ovrRating: true, goals: true, assists: true, matchesPlayed: true, motmCount: true } },
+        crewMemberships: { select: { crew: { select: { id: true, name: true } } }, take: 1 },
+      },
+    }),
+    workspacePromise,
+    listSeasons(),
+    // Stats are the ACTIVE crew's verdict and strictly read-only on this page.
+    workspacePromise.then(context => getCrewRatingSummary(context.activeCrewId, id)),
+  ]);
   if (!player?.playerProfile) notFound();
   const profile = player.playerProfile;
 
-  // Stats are the ACTIVE crew's verdict and strictly read-only on this page.
-  const [workspace, seasons, timeline, recentMatches] = await Promise.all([
-    getActiveCrewContext(viewer.id),
-    listSeasons(),
+  // Stage 2: the two reads keyed by the player's profile id.
+  const [timeline, recentMatches] = await Promise.all([
     prisma.playerSeasonStat.findMany({
       where: { playerProfileId: profile.id },
       select: { seasonId: true, ovrRating: true, goals: true, assists: true, matchesPlayed: true, motmCount: true },
@@ -68,7 +76,6 @@ export default async function PublicProfilePage({ params, searchParams }: { para
       },
     }),
   ]);
-  const summary = await getCrewRatingSummary(workspace.activeCrewId, player.id);
   const activeCrewName = workspace.crews.find((crew) => crew.id === workspace.activeCrewId)?.name ?? null;
 
   // Default to the live season; fall back to the requested one, then to active.

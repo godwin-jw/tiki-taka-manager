@@ -11,7 +11,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTr
 import { PlayerAvatar } from "@/components/player-avatar";
 import { OvrBadge } from "@/components/ovr-badge";
 import { RosterProvider, useRoster } from "@/components/roster-context";
-import { ActiveCrewSync, WorkspaceSwitcher } from "@/components/workspace-switcher";
+import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { CrewNav, type CrewNavItem } from "@/components/crew-nav";
 import { NoticeProvider } from "@/components/notice-provider";
 import { positions, type RosterPlayer } from "@/lib/football";
@@ -67,23 +67,19 @@ function RosterSidebar({ selectable, crews, activeCrewId, onNavigate }: { select
   </div>;
 }
 
-export function AppShell({ user, players, crews, activeCrewId, needsSync, children }: {
+export function AppShell({ user, players, crews, activeCrewId, children }: {
   user: ShellUser | null;
   players: RosterPlayer[];
   /** Crews the viewer belongs to; powers the workspace switcher in the header. */
   crews: Array<{ id: string; name: string }>;
   /** Resolved active crew (validated cookie or fallback). */
   activeCrewId: string | null;
-  /** True when the cookie was missing/stale and the fallback still needs persisting. */
-  needsSync: boolean;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   // Stable reference so the memoised crew menu is not re-rendered by the sheet state.
   const closeSheet = useCallback(() => setOpen(false), []);
   return <NoticeProvider><RosterProvider players={players}><div className="min-h-screen bg-[radial-gradient(ellipse_at_top_right,#064e3b22,transparent_45%)]">
-    {/* One-shot cookie writer for first visits / stale workspaces. */}
-    {user && <ActiveCrewSync activeCrewId={activeCrewId} needsSync={needsSync} />}
     <a href="#main-content" className="sr-only z-[100] rounded bg-emerald-300 p-3 text-black focus:not-sr-only focus:fixed focus:top-2 focus:left-2">İçeriğe geç</a>
     {user && <aside className="fixed inset-y-0 left-0 z-30 hidden w-72 border-r border-white/10 bg-zinc-950/80 backdrop-blur-xl lg:block"><RosterSidebar selectable={user.role === "CAPTAIN"} crews={crews} activeCrewId={activeCrewId} /></aside>}
     <div className={cn(user && "lg:pl-72")}>

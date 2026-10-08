@@ -29,15 +29,22 @@ function StatTile({ label, value, icon: Icon, accent = false }: { label: string;
 
 export default async function ProfilePage({ searchParams }: { searchParams: Promise<{ season?: string }> }) {
   const [sessionUser, { season: requestedSeason }] = await Promise.all([requireUser(), searchParams]);
-  const user = await prisma.user.findUniqueOrThrow({ where: { id: sessionUser.id }, include: { playerProfile: true } });
-  const profile = user.playerProfile;
+  // Stage 1: the three reads only need the session user, so they run together.
   // Attribute stats are the ACTIVE crew's verdict (read-only on this page).
-  const [workspace, seasons] = await Promise.all([getActiveCrewContext(sessionUser.id), listSeasons()]);
-  const summary = profile ? await getCrewRatingSummary(workspace.activeCrewId, sessionUser.id) : null;
+  const [user, workspace, seasons] = await Promise.all([
+    prisma.user.findUniqueOrThrow({ where: { id: sessionUser.id }, include: { playerProfile: true } }),
+    getActiveCrewContext(sessionUser.id),
+    listSeasons(),
+  ]);
+  const profile = user.playerProfile;
   const activeCrewName = workspace.crews.find((crew) => crew.id === workspace.activeCrewId)?.name ?? null;
   // Default to the requested season, then the live one.
   const selectedSeason = seasons.find(season => season.id === requestedSeason) ?? seasons.find(season => season.isActive) ?? seasons[0] ?? null;
-  const seasonStat = profile && selectedSeason ? await getSeasonStat(profile.id, selectedSeason.id) : null;
+  // Stage 2: the crew verdict and the season line are independent of each other.
+  const [summary, seasonStat] = await Promise.all([
+    profile ? getCrewRatingSummary(workspace.activeCrewId, sessionUser.id) : null,
+    profile && selectedSeason ? getSeasonStat(profile.id, selectedSeason.id) : null,
+  ]);
 
   const seasonStats = seasonStat
     ? [

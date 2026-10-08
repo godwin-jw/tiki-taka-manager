@@ -44,8 +44,7 @@ function Leaderboard({ title, icon: Icon, rows, metric }: {
 }
 
 export default async function CrewPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ katildi?: string }> }) {
-  const user = await requireUser();
-  const { id } = await params;
+  const [user, { id }] = await Promise.all([requireUser(), params]);
   const [{ katildi }, crew, invitations, workspace] = await Promise.all([
     searchParams,
     getCrewDetail(id, user.id),

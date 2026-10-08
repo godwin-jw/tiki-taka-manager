@@ -18,11 +18,21 @@ export async function createGlobalMatch(db: PrismaClient, userId: string, input:
   // resolves the scope from the activeCrewId cookie). An empty value is only
   // tolerated for legacy/global matches, which still require a platform captain.
   const crewId = optionalCrewId(input.crewId);
-  // New matches always count towards the live season.
-  const activeSeasonId = await db.season.findFirst({ where: { isActive: true }, select: { id: true } }).then(row => row?.id ?? null);
-  const user = await db.user.findUnique({ where: { id: userId }, select: { role: true } });
+  // Every read below depends only on the validated input, so they share one round
+  // trip instead of queueing. The checks that follow keep their original order, so
+  // the first failing rule (and its message) is unchanged.
+  const [activeSeasonId, user, membership, existing, profiles, crewMembers] = await Promise.all([
+    // New matches always count towards the live season.
+    db.season.findFirst({ where: { isActive: true }, select: { id: true } }).then(row => row?.id ?? null),
+    db.user.findUnique({ where: { id: userId }, select: { role: true } }),
+    crewId ? db.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { role: true } }) : null,
+    db.match.findUnique({ where: { id }, select: { createdById: true } }),
+    db.playerProfile.findMany({ where: { id: { in: lineup.map(p => p.id) } }, select: { id: true, ovrRating: true } }),
+    crewId
+      ? db.crewMember.findMany({ where: { crewId }, select: { user: { select: { playerProfile: { select: { id: true } } } } } })
+      : null,
+  ]);
   if (crewId) {
-    const membership = await db.crewMember.findUnique({ where: { crewId_userId: { crewId, userId } }, select: { role: true } });
     if (!membership) throw new ValidationError("Yalnızca üye olduğun ekip için maç oluşturabilirsin.");
     // Pitch-side authority: the platform captain flag OR a crew officer rank
     // (OWNER / CAPTAIN / CO_CAPTAIN) inside the target crew. The UI shows the
@@ -33,21 +43,15 @@ export async function createGlobalMatch(db: PrismaClient, userId: string, input:
   } else if (user?.role !== "CAPTAIN") {
     throw new ValidationError("Maç oluşturmak için kaptan olmalısın.");
   }
-  const existing = await db.match.findUnique({ where: { id }, select: { createdById: true } });
   if (existing) {
     if (existing.createdById !== userId) throw new ValidationError("Geçersiz işlem kimliği.");
     return id;
   }
-  const profiles = await db.playerProfile.findMany({ where: { id: { in: lineup.map(p => p.id) } }, select: { id: true, ovrRating: true } });
   if (profiles.length !== lineup.length) throw new ValidationError("Seçilen oyunculardan biri artık havuzda değil. Sayfayı yenile.");
   // A crew match may only field players who belong to that crew; otherwise the
   // crew archive would show results for players it never rostered.
-  if (crewId) {
-    const members = await db.crewMember.findMany({
-      where: { crewId },
-      select: { user: { select: { playerProfile: { select: { id: true } } } } },
-    });
-    const allowed = new Set(members.flatMap(row => row.user.playerProfile ? [row.user.playerProfile.id] : []));
+  if (crewId && crewMembers) {
+    const allowed = new Set(crewMembers.flatMap(row => row.user.playerProfile ? [row.user.playerProfile.id] : []));
     if (lineup.some(player => !allowed.has(player.id))) throw new ValidationError("Kadro yalnızca bu ekibin üyelerinden oluşabilir.");
   }
   // Contextual OVR: a crew match records the rating THIS crew gives its players.
@@ -106,19 +110,48 @@ export async function reportGlobalMatch(db: PrismaClient, userId: string, matchI
     // The status and every statistic commit together, or all roll back.
     const claimed = await tx.match.updateMany({ where: { id: matchId, createdById: userId, status: "ONGOING", reportedAt: null }, data: { status: "COMPLETED", isCompleted: true, reportedAt: new Date(), teamAScore: report.scoreA, teamBScore: report.scoreB } });
     if (claimed.count !== 1) throw new ValidationError("Bu rapor başka bir istekte onaylandı. Sayfayı yenile.");
-    for (const row of report.players) {
-      const isMotm = row.id === report.motmId;
-      await tx.matchPlayer.update({ where: { matchId_playerProfileId: { matchId, playerProfileId: row.id } }, data: { goals: row.goals, assists: row.assists, isMotm } });
-      const updated = await tx.playerProfile.update({ where: { id: row.id }, data: { goals: { increment: row.goals }, assists: { increment: row.assists }, matchesPlayed: { increment: 1 }, motmCount: { increment: isMotm ? 1 : 0 } }, select: { ovrRating: true } });
-      // Mirror the same numbers onto the season line in this transaction, so a
-      // rolled-back report can never leave career and season totals disagreeing.
-      if (match.seasonId) {
-        await tx.playerSeasonStat.upsert({
-          where: { seasonId_playerProfileId: { seasonId: match.seasonId, playerProfileId: row.id } },
-          create: { seasonId: match.seasonId, playerProfileId: row.id, goals: row.goals, assists: row.assists, matchesPlayed: 1, motmCount: isMotm ? 1 : 0, ovrRating: updated.ovrRating },
-          update: { goals: { increment: row.goals }, assists: { increment: row.assists }, matchesPlayed: { increment: 1 }, motmCount: { increment: isMotm ? 1 : 0 }, ovrRating: updated.ovrRating },
-        });
-      }
+    // Set-based writes: one statement per table instead of three per player (a
+    // 14-player report used to cost ~42 sequential round trips inside this
+    // transaction). The arrays are parallel, one slot per reported player.
+    const ids = report.players.map(p => p.id);
+    const goals = report.players.map(p => p.goals);
+    const assists = report.players.map(p => p.assists);
+    const motm = report.players.map(p => p.id === report.motmId);
+    const matchRows = await tx.$executeRaw`
+      UPDATE "MatchPlayer" AS mp
+      SET "goals" = v."goals", "assists" = v."assists", "isMotm" = v."isMotm"
+      FROM unnest(${ids}::text[], ${goals}::int[], ${assists}::int[], ${motm}::boolean[]) AS v("pid", "goals", "assists", "isMotm")
+      WHERE mp."matchId" = ${matchId} AND mp."playerProfileId" = v."pid"
+    `;
+    const profileRows = await tx.$executeRaw`
+      UPDATE "GlobalPlayerProfile" AS p
+      SET "goals" = p."goals" + v."goals",
+          "assists" = p."assists" + v."assists",
+          "matchesPlayed" = p."matchesPlayed" + 1,
+          "motmCount" = p."motmCount" + CASE WHEN v."isMotm" THEN 1 ELSE 0 END,
+          "updatedAt" = NOW()
+      FROM unnest(${ids}::text[], ${goals}::int[], ${assists}::int[], ${motm}::boolean[]) AS v("pid", "goals", "assists", "isMotm")
+      WHERE p."id" = v."pid"
+    `;
+    // Every reported player must have been written; anything else rolls the whole
+    // transaction back (the per-row update used to fail the same way).
+    if (matchRows !== ids.length || profileRows !== ids.length) throw new Error("Rapor satırları yazılamadı.");
+    // Mirror the same numbers onto the season line in this transaction, so a
+    // rolled-back report can never leave career and season totals disagreeing.
+    if (match.seasonId) {
+      await tx.$executeRaw`
+        INSERT INTO "PlayerSeasonStat" ("id", "seasonId", "playerProfileId", "goals", "assists", "matchesPlayed", "motmCount", "ovrRating", "updatedAt")
+        SELECT gen_random_uuid()::text, ${match.seasonId}::text, v."pid", v."goals", v."assists", 1, CASE WHEN v."isMotm" THEN 1 ELSE 0 END, p."ovrRating", NOW()
+        FROM unnest(${ids}::text[], ${goals}::int[], ${assists}::int[], ${motm}::boolean[]) AS v("pid", "goals", "assists", "isMotm")
+        JOIN "GlobalPlayerProfile" AS p ON p."id" = v."pid"
+        ON CONFLICT ("seasonId", "playerProfileId") DO UPDATE SET
+          "goals" = "PlayerSeasonStat"."goals" + EXCLUDED."goals",
+          "assists" = "PlayerSeasonStat"."assists" + EXCLUDED."assists",
+          "matchesPlayed" = "PlayerSeasonStat"."matchesPlayed" + 1,
+          "motmCount" = "PlayerSeasonStat"."motmCount" + EXCLUDED."motmCount",
+          "ovrRating" = EXCLUDED."ovrRating",
+          "updatedAt" = NOW()
+      `;
     }
     return match.id;
   }, { maxWait: 10_000, timeout: 30_000 });
@@ -171,28 +204,35 @@ export async function deleteGlobalMatch(db: PrismaClient, userId: string, matchI
         where: { matchId: match.id },
         select: { playerProfileId: true, goals: true, assists: true, isMotm: true },
       });
-      for (const row of rows) {
-        const motm = row.isMotm ? 1 : 0;
+      if (rows.length > 0) {
+        // One statement per table instead of two per player. The arrays are
+        // parallel, one slot per appearance.
+        const ids = rows.map(row => row.playerProfileId);
+        const goals = rows.map(row => row.goals);
+        const assists = rows.map(row => row.assists);
+        const motm = rows.map(row => (row.isMotm ? 1 : 0));
         await tx.$executeRaw`
-          UPDATE "GlobalPlayerProfile"
-          SET "goals" = GREATEST(0, "goals" - ${row.goals}),
-              "assists" = GREATEST(0, "assists" - ${row.assists}),
-              "matchesPlayed" = GREATEST(0, "matchesPlayed" - 1),
-              "motmCount" = GREATEST(0, "motmCount" - ${motm}),
+          UPDATE "GlobalPlayerProfile" AS p
+          SET "goals" = GREATEST(0, p."goals" - v."goals"),
+              "assists" = GREATEST(0, p."assists" - v."assists"),
+              "matchesPlayed" = GREATEST(0, p."matchesPlayed" - 1),
+              "motmCount" = GREATEST(0, p."motmCount" - v."motm"),
               "updatedAt" = NOW()
-          WHERE "id" = ${row.playerProfileId}
+          FROM unnest(${ids}::text[], ${goals}::int[], ${assists}::int[], ${motm}::int[]) AS v("pid", "goals", "assists", "motm")
+          WHERE p."id" = v."pid"
         `;
         // The season line was incremented in the same transaction as the career
         // line, so it has to be rewound in lockstep or the two would disagree.
         if (match.seasonId) {
           await tx.$executeRaw`
-            UPDATE "PlayerSeasonStat"
-            SET "goals" = GREATEST(0, "goals" - ${row.goals}),
-                "assists" = GREATEST(0, "assists" - ${row.assists}),
-                "matchesPlayed" = GREATEST(0, "matchesPlayed" - 1),
-                "motmCount" = GREATEST(0, "motmCount" - ${motm}),
+            UPDATE "PlayerSeasonStat" AS s
+            SET "goals" = GREATEST(0, s."goals" - v."goals"),
+                "assists" = GREATEST(0, s."assists" - v."assists"),
+                "matchesPlayed" = GREATEST(0, s."matchesPlayed" - 1),
+                "motmCount" = GREATEST(0, s."motmCount" - v."motm"),
                 "updatedAt" = NOW()
-            WHERE "seasonId" = ${match.seasonId} AND "playerProfileId" = ${row.playerProfileId}
+            FROM unnest(${ids}::text[], ${goals}::int[], ${assists}::int[], ${motm}::int[]) AS v("pid", "goals", "assists", "motm")
+            WHERE s."seasonId" = ${match.seasonId} AND s."playerProfileId" = v."pid"
           `;
         }
       }

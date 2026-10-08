@@ -1,9 +1,10 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
+import { ROSTER_TAG } from "@/lib/cache-tags";
 import { prisma } from "@/lib/prisma";
 import { ACTIVE_CREW_COOKIE } from "@/lib/active-crew";
 import {
@@ -159,6 +160,8 @@ export async function renameCrew(crewId: string, newName: string): Promise<Actio
   const user = await requireUser();
   try {
     const result = await renameCrewByOwner(prisma, user.id, crewId, newName);
+    // Deliberately layout-wide: the name is part of the layout's crew list, so
+    // this is one of the few writes that really invalidates the whole tree.
     revalidatePath("/", "layout");
     return { success: result.changed ? "Ekip adı güncellendi." : "Ekip adı zaten bu şekilde." };
   } catch (error) {
@@ -192,6 +195,11 @@ export async function deleteCrew(crewId: string, confirmName: string): Promise<A
   const store = await cookies();
   // The service trims the id, so compare the trimmed value the same way.
   if (store.get(ACTIVE_CREW_COOKIE)?.value === crewId.trim()) store.delete(ACTIVE_CREW_COOKIE);
+  // The deletion rewinds the crew's match stats, which also changes the recent
+  // form shown in the cached global roster.
+  updateTag(ROSTER_TAG);
+  // Deliberately layout-wide: the deleted crew disappears from the layout's crew
+  // list and every page that was scoped to it.
   revalidatePath("/", "layout");
   redirect("/ekipler");
 }

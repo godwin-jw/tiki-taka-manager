@@ -35,16 +35,19 @@ export async function aggregateCrewStandings(
   const totals = new Map<string, { goals: number; assists: number; matchesPlayed: number; motmCount: number }>();
   if (profileIds.length === 0) return totals;
 
-  const scoped = await db.matchPlayer.groupBy({
-    by: ["playerProfileId"],
-    where: { playerProfileId: { in: [...profileIds] }, match: { crewId, seasonId } },
-    _sum: { goals: true, assists: true },
-    _count: { _all: true },
-  });
-  const motmRows = await db.matchPlayer.findMany({
-    where: { playerProfileId: { in: [...profileIds] }, isMotm: true, match: { crewId, seasonId } },
-    select: { playerProfileId: true },
-  });
+  // Independent reads: one round trip each, so they run side by side.
+  const [scoped, motmRows] = await Promise.all([
+    db.matchPlayer.groupBy({
+      by: ["playerProfileId"],
+      where: { playerProfileId: { in: [...profileIds] }, match: { crewId, seasonId } },
+      _sum: { goals: true, assists: true },
+      _count: { _all: true },
+    }),
+    db.matchPlayer.findMany({
+      where: { playerProfileId: { in: [...profileIds] }, isMotm: true, match: { crewId, seasonId } },
+      select: { playerProfileId: true },
+    }),
+  ]);
   const motmByProfile = new Map<string, number>();
   for (const row of motmRows) motmByProfile.set(row.playerProfileId, (motmByProfile.get(row.playerProfileId) ?? 0) + 1);
 

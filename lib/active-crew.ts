@@ -1,5 +1,6 @@
 import "server-only";
 
+import { cache } from "react";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import type { CrewRoleName } from "@/lib/football";
@@ -40,14 +41,23 @@ export type ActiveCrewContext = {
  * Order: memberships by join date → validate the cookie against them → fall
  * back to the first membership. Both reads happen in one place so the layout,
  * the dashboard and the match page can never disagree about the workspace.
+ *
+ * Wrapped in `cache`: the layout and the page both ask for it in the same
+ * request and now share one membership query. Outside a render (Server Actions)
+ * `cache` does not memoise, so a membership change is always read fresh there.
  */
-export async function getActiveCrewContext(userId: string): Promise<ActiveCrewContext> {
-  const memberships = await prisma.crewMember.findMany({
-    where: { userId },
-    // Deterministic fallback: the crew the user joined first is the default.
-    orderBy: { joinedAt: "asc" },
-    select: { role: true, crew: { select: { id: true, name: true } } },
-  });
+export const getActiveCrewContext = cache(async (userId: string): Promise<ActiveCrewContext> => {
+  // The cookie jar is a header read, not I/O, but awaiting it first would still
+  // delay the membership query by a tick; both start together.
+  const [memberships, jar] = await Promise.all([
+    prisma.crewMember.findMany({
+      where: { userId },
+      // Deterministic fallback: the crew the user joined first is the default.
+      orderBy: { joinedAt: "asc" },
+      select: { role: true, crew: { select: { id: true, name: true } } },
+    }),
+    cookies(),
+  ]);
   const crews = memberships.map((membership) => ({
     id: membership.crew.id,
     name: membership.crew.name,
@@ -55,14 +65,14 @@ export async function getActiveCrewContext(userId: string): Promise<ActiveCrewCo
   }));
   if (crews.length === 0) return { activeCrewId: null, crews, cookieValid: true };
 
-  const cookieValue = (await cookies()).get(ACTIVE_CREW_COOKIE)?.value ?? "";
+  const cookieValue = jar.get(ACTIVE_CREW_COOKIE)?.value ?? "";
   const cookieValid = crews.some((crew) => crew.id === cookieValue);
   return {
     activeCrewId: cookieValid ? cookieValue : crews[0].id,
     crews,
     cookieValid,
   };
-}
+});
 
 /**
  * The crew id match creation must write, straight from the cookie.

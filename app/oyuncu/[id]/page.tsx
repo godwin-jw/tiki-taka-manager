@@ -13,26 +13,31 @@ import { positionLabels } from "@/lib/football";
 export const metadata = { title: "Oyuncu Kartı" };
 
 export default async function PlayerPage({ params }: { params: Promise<{ id: string }> }) {
-  const user = await requireUser();
-  const { id } = await params;
-  const [player, workspace] = await Promise.all([
+  const [user, { id }] = await Promise.all([requireUser(), params]);
+  // One stage instead of two: the crew-scoped reads only need the active crew id
+  // (not the player row), so they are chained to the workspace lookup and run
+  // while the player is still loading. `id` is the player's id by construction.
+  const workspacePromise = getActiveCrewContext(user.id);
+  const [player, workspace, summary, membership, myVote] = await Promise.all([
     prisma.user.findUnique({ where: { id }, select: {
       id: true, name: true, image: true, role: true,
       playerProfile: { select: { position: true, jerseyNumber: true, goals: true, assists: true, matchesPlayed: true, motmCount: true } },
     } }),
-    getActiveCrewContext(user.id),
+    workspacePromise,
+    workspacePromise.then(context => getCrewRatingSummary(context.activeCrewId, id)),
+    workspacePromise.then(({ activeCrewId }) => activeCrewId
+      ? prisma.crewMember.findUnique({ where: { crewId_userId: { crewId: activeCrewId, userId: id } }, select: { id: true } })
+      : null),
+    workspacePromise.then(({ activeCrewId }) => activeCrewId && id !== user.id
+      ? prisma.playerRatingVote.findUnique({
+          where: { crewId_voterId_targetUserId: { crewId: activeCrewId, voterId: user.id, targetUserId: id } },
+          select: { pace: true, shooting: true, passing: true, dribbling: true, defending: true, physical: true },
+        })
+      : null),
   ]);
   if (!player?.playerProfile) notFound();
   const profile = player.playerProfile;
   const crewId = workspace.activeCrewId;
-  const [summary, membership, myVote] = await Promise.all([
-    getCrewRatingSummary(crewId, player.id),
-    crewId ? prisma.crewMember.findUnique({ where: { crewId_userId: { crewId, userId: player.id } }, select: { id: true } }) : null,
-    crewId && player.id !== user.id ? prisma.playerRatingVote.findUnique({
-      where: { crewId_voterId_targetUserId: { crewId, voterId: user.id, targetUserId: player.id } },
-      select: { pace: true, shooting: true, passing: true, dribbling: true, defending: true, physical: true },
-    }) : null,
-  ]);
   const crewName = workspace.crews.find(crew => crew.id === crewId)?.name;
   const career: Array<[string, number]> = [["Maç", profile.matchesPlayed], ["Gol", profile.goals], ["Asist", profile.assists], ["MOTM", profile.motmCount]];
 
